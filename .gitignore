@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ChamberKeep local runtime config (may contain the UI password)
+chamberkeep.json
