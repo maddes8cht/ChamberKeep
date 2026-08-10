@@ -458,6 +458,14 @@ class SSHTunnel:
                 return "SSH connection not established yet (will retry)"
             try:
                 import paramiko
+            except ImportError:
+                self._last_failure = time.monotonic()
+                return (
+                    "paramiko is not installed. Install it with "
+                    "`pip install paramiko` (in the same Python that runs "
+                    "ChamberKeep) to use SSH control."
+                )
+            try:
                 client = paramiko.SSHClient()
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 try:
@@ -476,6 +484,16 @@ class SSHTunnel:
                 self._client = client
                 self._last_failure = 0.0
                 return None
+            except paramiko.AuthenticationException:
+                self._last_failure = time.monotonic()
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                return (
+                    "SSH authentication failed for %s@%s: wrong password/key"
+                    % (self.config.remote_user, self.config.remote_host)
+                )
             except Exception as exc:
                 self._last_failure = time.monotonic()
                 try:
@@ -1423,12 +1441,17 @@ class SettingsDialog:
         )
         row += 1
 
-        self._add_label(row, 0, "SSH password")
+        self._add_label(row, 0, "User password (target PC)")
         pw_entry = tk.Entry(
             self.body, textvariable=self.remote_password_var, show="*", width=30
         )
         pw_entry.grid(row=row, column=1, sticky="we")
-        ToolTip(pw_entry, "Optional; leave empty to use an SSH key instead.")
+        ToolTip(
+            pw_entry,
+            "Login password of the user above on the target PC - the same one "
+            "used for `ssh user@host` in a terminal. Leave empty to use an "
+            "SSH key instead.",
+        )
         row += 1
 
         self._add_label(row, 0, "Agent token")

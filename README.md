@@ -59,7 +59,9 @@ interprets the JSON output.
 
 **Client PC (runs the tray):**
 1. In settings -> "Remote": enable remote control, choose the transport,
-   enter the target host/user/ports and the agent token from the target.
+   enter the target host, the user, the user's login password on the target
+   PC (or leave empty to use an SSH key), the ports and the agent token from
+   the target.
 2. Use "Test connection..." to verify, then Save. The tray now controls the
    remote server with the same status/start/stop/restart/update behavior.
 
