@@ -69,6 +69,15 @@ STATE_LABELS = {
     "error": "Error",
 }
 
+# Per-state logo PNGs (generated from logo-light.svg via generate_icons.py).
+# Falls back to the colored circle when a file is missing.
+LOGO_PATHS = {
+    "running": os.path.join(SCRIPT_DIR, "logo-green.png"),
+    "stopped": os.path.join(SCRIPT_DIR, "logo-red.png"),
+    "ambiguous": os.path.join(SCRIPT_DIR, "logo-yellow.png"),
+    "error": os.path.join(SCRIPT_DIR, "logo-red.png"),
+}
+
 _MUTEX_HANDLE = None
 
 
@@ -370,11 +379,21 @@ class TrayApp:
 
     @staticmethod
     def create_image(color):
-        """Create a 64x64 colored circle icon."""
+        """Create a 64x64 colored circle icon (fallback)."""
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         draw.ellipse([6, 6, 58, 58], fill=color, outline="#000000", width=2)
         return img
+
+    def create_icon(self, state):
+        """Return the logo icon for `state`, falling back to a circle."""
+        path = LOGO_PATHS.get(state)
+        if path and os.path.exists(path):
+            try:
+                return Image.open(path).convert("RGBA")
+            except OSError:
+                pass
+        return self.create_image(ICON_COLORS.get(state, "gray"))
 
     def build_menu(self):
         """Build the tray menu reflecting the current state."""
@@ -408,8 +427,7 @@ class TrayApp:
             changed = state != self.state or info != self.status_info
             self.state = state
             self.status_info = info
-            color = ICON_COLORS.get(state, "gray")
-            self.icon.icon = self.create_image(color)
+            self.icon.icon = self.create_icon(state)
             self.icon.title = "%s - OpenChamber (port %s)" % (
                 STATE_LABELS.get(state, "Unknown"),
                 self.config.port,
@@ -557,7 +575,7 @@ class TrayApp:
         self._tk_root.after(100, self._tk_poll)
         self.icon = pystray.Icon(
             APP_NAME,
-            self.create_image(ICON_COLORS["stopped"]),
+            self.create_icon("stopped"),
             "%s - OpenChamber (port %s)" % (APP_NAME, self.config.port),
             self.build_menu(),
         )

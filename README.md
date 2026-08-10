@@ -9,6 +9,8 @@ interprets the JSON output.
 
 - Systray icon reflecting the real server state (green = running, red =
   stopped, yellow = ambiguous), polled from `openchamber status --json`.
+  The icon is the ChamberKeep logo in the state color (pre-rendered from
+  `logo-light.svg`).
 - Start / Stop / Restart / Update from the tray menu.
 - Exiting the tray never stops the server; OpenChamber keeps running as a
   daemon.
@@ -86,3 +88,6 @@ any file on disk.
 
 - All code comments and docstrings are English.
 - Tests: `python <temp>/test_ck_logic.py` (pure logic, no server required).
+- Icons: the `logo-*.png` tray icons are generated from `logo-light.svg` via
+  `python generate_icons.py` (dev-time only, needs `resvg-py`). Re-run it
+  whenever the SVG changes and commit the updated PNGs.
