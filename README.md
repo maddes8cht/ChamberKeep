@@ -12,6 +12,11 @@ interprets the JSON output.
   The icon is the ChamberKeep logo in the state color (pre-rendered from
   `logo-light.svg`).
 - Start / Stop / Restart / Update from the tray menu.
+- During `update` the tray shows a blinking inverted logo with an
+  "Updating..." tooltip; transient status errors are suppressed. When the
+  update finishes, the display returns to the real state, and if the server
+  was running before, ChamberKeep starts it again automatically. A warning
+  is shown if the update takes longer than two minutes.
 - Exiting the tray never stops the server; OpenChamber keeps running as a
   daemon.
 - Settings UI with the environment variables OpenChamber reads. Each field

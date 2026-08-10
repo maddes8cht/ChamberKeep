@@ -76,7 +76,18 @@ LOGO_PATHS = {
     "stopped": os.path.join(SCRIPT_DIR, "logo-red.png"),
     "ambiguous": os.path.join(SCRIPT_DIR, "logo-yellow.png"),
     "error": os.path.join(SCRIPT_DIR, "logo-red.png"),
+    "updating": os.path.join(SCRIPT_DIR, "logo-inverted.png"),
 }
+
+# Update progress handling: while `update` runs, error notifications are
+# suppressed and the tray shows a blinking inverted logo with an
+# "Updating..." tooltip. The mode ends once two consecutive polls report a
+# valid status (or after UPDATE_TIMEOUT seconds, which prompts the user to
+# check the server). If the server was running before the update, it is
+# started again two poll cycles after the status stabilized.
+UPDATE_STABLE_POLLS = 2
+UPDATE_RESTART_POLLS = 2
+UPDATE_TIMEOUT = 120.0  # seconds
 
 _MUTEX_HANDLE = None
 
@@ -369,11 +380,21 @@ class TrayApp:
         self.state = "unknown"
         self.status_info = ""
         self._stop_poll = threading.Event()
-        self._refresh_lock = threading.Lock()
+        self._refresh_lock = threading.RLock()
         self._first_refresh = True
         self._tk_root = None
         self._tk_queue = queue.Queue()
         self._settings = None
+        self._update_mode = False
+        self._update_command_done = False
+        self._update_start = 0.0
+        self._update_timeout_warned = False
+        self._update_stable = 0
+        self._update_extra = 0
+        self._update_restart_done = False
+        self._update_blink = False
+        self._update_was_running = False
+        self._update_normal_state = "stopped"
 
     # --- icon / menu ------------------------------------------------------
 
@@ -397,17 +418,21 @@ class TrayApp:
 
     def build_menu(self):
         """Build the tray menu reflecting the current state."""
-        state_label = STATE_LABELS.get(self.state, "Unknown")
-        status_text = "Status: %s" % state_label
-        if self.status_info:
-            status_text += " - %s" % self.status_info
+        updating = self._update_mode
+        if updating:
+            status_text = "Status: Updating..."
+        else:
+            state_label = STATE_LABELS.get(self.state, "Unknown")
+            status_text = "Status: %s" % state_label
+            if self.status_info:
+                status_text += " - %s" % self.status_info
         return pystray.Menu(
             pystray.MenuItem(status_text, None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Start Server", self.on_start),
-            pystray.MenuItem("Stop Server", self.on_stop),
-            pystray.MenuItem("Restart Server", self.on_restart),
-            pystray.MenuItem("Update", self.on_update),
+            pystray.MenuItem("Start Server", self.on_start, enabled=not updating),
+            pystray.MenuItem("Stop Server", self.on_stop, enabled=not updating),
+            pystray.MenuItem("Restart Server", self.on_restart, enabled=not updating),
+            pystray.MenuItem("Update", self.on_update, enabled=not updating),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings...", self.on_settings),
             pystray.Menu.SEPARATOR,
@@ -420,23 +445,137 @@ class TrayApp:
             if self.icon is None:
                 return
             data, err = self.oc.status()
+            if self._update_mode:
+                self._refresh_during_update(data, err)
+                return
             if err:
                 state, info = "error", err
             else:
                 state, info = resolve_state(data, self.config.port)
-            changed = state != self.state or info != self.status_info
-            self.state = state
-            self.status_info = info
-            self.icon.icon = self.create_icon(state)
-            self.icon.title = "%s - OpenChamber (port %s)" % (
-                STATE_LABELS.get(state, "Unknown"),
-                self.config.port,
+            self._apply_normal_display(state, info)
+
+    def _refresh_during_update(self, data, err):
+        """Handle a poll while an update is in progress.
+
+        Polling continues but error notifications are suppressed. Until the
+        update command has finished, the icon shows a blinking inverted logo
+        with an "Updating..." tooltip. Afterwards the display returns to the
+        real status once two consecutive polls report a valid status, and -
+        if the server was running before the update - it is started again
+        two poll cycles later. After UPDATE_TIMEOUT seconds the user is
+        warned to check the status, since the update may have failed.
+        """
+        if not self._update_command_done:
+            if time.monotonic() - self._update_start >= UPDATE_TIMEOUT:
+                self._warn_update_timeout()
+            self._apply_updating_display()
+            return
+        state, info = ("error", err) if err else resolve_state(data, self.config.port)
+        stable = not err and state != "error"
+        self._update_stable = self._update_stable + 1 if stable else 0
+        if not stable:
+            self._update_extra = 0
+        if self._update_stable >= UPDATE_STABLE_POLLS:
+            if self._update_was_running and not self._update_restart_done:
+                if self._update_extra == 0:
+                    self._update_extra = UPDATE_RESTART_POLLS
+                else:
+                    self._update_extra -= 1
+                    if self._update_extra == 0:
+                        self._update_restart_done = True
+                        self._schedule_start_after_update()
+                self._apply_normal_display(state, info)
+                return
+            self._finish_update(state, info)
+            return
+        if time.monotonic() - self._update_start >= UPDATE_TIMEOUT:
+            self._warn_update_timeout()
+            self._finish_update(state, info)
+            return
+        self._apply_updating_display()
+
+    def _warn_update_timeout(self):
+        """Warn once when the update exceeds the expected duration."""
+        if not self._update_timeout_warned:
+            self._update_timeout_warned = True
+            self.notify(
+                "Update is taking longer than %d seconds. Please check the "
+                "OpenChamber status - the update may have failed."
+                % int(UPDATE_TIMEOUT),
+                "ChamberKeep - Update warning",
             )
-            self.icon.menu = self.build_menu()
-            self.icon.update_menu()
-            if changed and not self._first_refresh:
-                self.notify(self.status_info, STATE_LABELS.get(state, state))
-            self._first_refresh = False
+
+    def _finish_update(self, state, info):
+        """Leave update mode and show the real status."""
+        self._update_mode = False
+        self._update_command_done = False
+        self._update_stable = 0
+        self._update_extra = 0
+        self._update_restart_done = False
+        self._apply_normal_display(state, info)
+
+    def _apply_normal_display(self, state, info):
+        """Apply the regular icon/tooltip/menu for a real status."""
+        changed = state != self.state or info != self.status_info
+        self.state = state
+        self.status_info = info
+        self.icon.icon = self.create_icon(state)
+        self.icon.title = "%s - OpenChamber (port %s)" % (
+            STATE_LABELS.get(state, "Unknown"),
+            self.config.port,
+        )
+        self.icon.menu = self.build_menu()
+        self.icon.update_menu()
+        if changed and not self._first_refresh and not self._update_mode:
+            self.notify(self.status_info, STATE_LABELS.get(state, state))
+        self._first_refresh = False
+
+    def _apply_updating_display(self):
+        """Blink the inverted logo and report "Updating..." in update mode."""
+        self._update_blink = not self._update_blink
+        self.icon.icon = self._updating_icon()
+        self.icon.title = "ChamberKeep - Updating... (port %s)" % self.config.port
+        self.icon.menu = self.build_menu()
+        self.icon.update_menu()
+
+    def _updating_icon(self):
+        """Alternate between the inverted logo and the pre-update state icon."""
+        if self._update_blink:
+            return self.create_icon("updating")
+        return self.create_icon(self._update_normal_state)
+
+    def _enter_update_mode(self):
+        """Enter update mode: suppress errors and show the updating icon."""
+        self._update_mode = True
+        self._update_command_done = False
+        self._update_start = time.monotonic()
+        self._update_timeout_warned = False
+        self._update_stable = 0
+        self._update_extra = 0
+        self._update_restart_done = False
+        self._update_blink = False
+        self._update_was_running = self.state == "running"
+        self._update_normal_state = self.state if self.state != "unknown" else "stopped"
+
+    def _schedule_start_after_update(self):
+        """Start the server after an update, but only if it is not running."""
+
+        def run():
+            try:
+                data, err = self.oc.status()
+                if not err:
+                    state, _ = resolve_state(data, self.config.port)
+                    if state == "running":
+                        return
+                self.oc.start()
+                self.notify(
+                    "Server restarted after update (port %s)." % self.config.port,
+                    "ChamberKeep",
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     def notify(self, message, title):
         """Show a native tray notification (best effort)."""
@@ -495,16 +634,20 @@ class TrayApp:
     def do_update(self):
         proc, err = self.oc.update()
         if err:
+            self._update_mode = False
             return False, err
         try:
             data = json.loads(proc.stdout)
             current = data.get("currentVersion", "?")
             latest = data.get("latestVersion", "?")
             if data.get("updated"):
+                self._update_command_done = True
                 return True, "OpenChamber updated %s -> %s" % (current, latest)
+            self._update_mode = False
             return True, "OpenChamber is up to date (%s)" % current
         except json.JSONDecodeError:
             detail = proc.stdout.strip() or "unknown"
+            self._update_mode = False
             return proc.returncode == 0, detail
 
     def on_start(self, icon, item):
@@ -517,6 +660,8 @@ class TrayApp:
         self._spawn(self.do_restart)
 
     def on_update(self, icon, item):
+        self._enter_update_mode()
+        self._apply_updating_display()
         self._spawn(self.do_update)
 
     def on_settings(self, icon, item):
