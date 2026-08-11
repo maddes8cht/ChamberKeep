@@ -42,7 +42,7 @@ SERVE_LOG_PATH = os.path.join(SCRIPT_DIR, "chamberkeep-serve.log")
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 APP_NAME = "ChamberKeep"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 # Defaults for the environment variables OpenChamber reads.
@@ -755,6 +755,31 @@ def agent_running(port):
         return False
 
 
+def stop_agent(port, token):
+    """Ask the chamberkeep-agent on `port` to shut itself down.
+
+    Returns (ok, message). Works no matter how the agent was started
+    (terminal or background), since it is just an authenticated request.
+    """
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "POST", "/api/shutdown", headers={"X-ChamberKeep-Token": token}
+        )
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", "replace")
+        conn.close()
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if resp.status == 200 and payload.get("ok"):
+            return True, "Agent stopped"
+        return False, payload.get("error") or "shutdown failed (%s)" % resp.status
+    except OSError as exc:
+        return False, "Agent unreachable: %s" % exc
+
+
 def launch_agent(port):
     """Start chamberkeep-agent.py on `port` if it is not running.
 
@@ -800,6 +825,7 @@ class TrayApp:
         self._update_blink = False
         self._update_was_running = False
         self._update_normal_state = "stopped"
+        self.agent_running = agent_running(self.config.agent_port)
 
     def reload_backend(self):
         """Re-create the control backend from the current config.
@@ -857,6 +883,18 @@ class TrayApp:
             pystray.MenuItem("Restart Server", self.on_restart, enabled=not updating),
             pystray.MenuItem("Update", self.on_update, enabled=not updating),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                "Agent: Running" if self.agent_running else "Agent: Stopped",
+                None,
+                enabled=False,
+            ),
+            pystray.MenuItem(
+                "Start Agent", self.on_start_agent, enabled=not self.agent_running
+            ),
+            pystray.MenuItem(
+                "Stop Agent", self.on_stop_agent, enabled=self.agent_running
+            ),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings...", self.on_settings),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", self.on_exit),
@@ -867,6 +905,7 @@ class TrayApp:
         with self._refresh_lock:
             if self.icon is None:
                 return
+            self.agent_running = agent_running(self.config.agent_port)
             data, err = self.oc.status()
             if self._update_mode:
                 self._refresh_during_update(data, err)
@@ -1040,6 +1079,18 @@ class TrayApp:
     def do_restart(self):
         return self.oc.restart()
 
+    def do_start_agent(self):
+        result = launch_agent(self.config.agent_port)
+        ok = "failed" not in result
+        time.sleep(0.5)
+        return ok, "Agent: %s" % result
+
+    def do_stop_agent(self):
+        token = self.config.ensure_agent_token()
+        ok, message = stop_agent(self.config.agent_port, token)
+        time.sleep(1.0)
+        return ok, "Agent: %s" % message
+
     def do_update(self):
         ok, message, updated = self.oc.update()
         if not ok:
@@ -1059,6 +1110,12 @@ class TrayApp:
 
     def on_restart(self, icon, item):
         self._spawn(self.do_restart)
+
+    def on_start_agent(self, icon, item):
+        self._spawn(self.do_start_agent)
+
+    def on_stop_agent(self, icon, item):
+        self._spawn(self.do_stop_agent)
 
     def on_update(self, icon, item):
         self._enter_update_mode()
@@ -1256,6 +1313,7 @@ class SettingsDialog:
         self.remote_token_var = tk.StringVar()
         self.start_agent_var = tk.BooleanVar()
         self.agent_port_var = tk.StringVar()
+        self.agent_status_var = tk.StringVar()
 
         self._build()
         self._populate()
@@ -1422,6 +1480,14 @@ class SettingsDialog:
             self.body, text="Start agent now", command=self.on_start_agent
         ).grid(row=row, column=1, sticky="w", pady=(8, 0))
         row += 1
+        self._add_label(row, 0, "Agent status")
+        tk.Label(self.body, textvariable=self.agent_status_var).grid(
+            row=row, column=1, sticky="w"
+        )
+        row += 1
+        tk.Button(
+            self.body, text="Stop agent now", command=self.on_stop_agent
+        ).grid(row=row, column=1, sticky="w", pady=(8, 0))
 
     def _build_remote_tab(self):
         row = 0
@@ -1550,6 +1616,9 @@ class SettingsDialog:
         self.remote_token_var.set(self.config.agent_token)
         self.start_agent_var.set(self.config.start_agent)
         self.agent_port_var.set(str(self.config.agent_port))
+        self.agent_status_var.set(
+            "Running" if agent_running(self.config.agent_port) else "Stopped"
+        )
 
     def _set_lamp(self, key, widget):
         """Refresh a lamp widget to match the current source for a key."""
@@ -1754,7 +1823,23 @@ class SettingsDialog:
         except ValueError:
             port = self.config.agent_port
         result = launch_agent(port)
+        self.agent_status_var.set(
+            "Running" if agent_running(port) else "Stopped"
+        )
         messagebox.showinfo("Start agent", "Agent: %s" % result)
+
+    def on_stop_agent(self):
+        """Ask the local chamberkeep-agent to shut itself down."""
+        try:
+            port = int(self.agent_port_var.get().strip())
+        except ValueError:
+            port = self.config.agent_port
+        token = self.config.ensure_agent_token()
+        ok, message = stop_agent(port, token)
+        self.agent_status_var.set(
+            "Running" if agent_running(port) else "Stopped"
+        )
+        messagebox.showinfo("Stop agent", "Agent: %s" % message)
 
     def on_cancel(self):
         """Close the dialog by hiding the root again."""

@@ -25,6 +25,7 @@ Endpoints (JSON):
     GET  /api/ping                       -> {"ok": true}
     GET  /api/status                     -> {"ok": true, "data": <status json>, "port": N}
     POST /api/start|stop|restart|update  -> {"ok": true, "message": "..."}
+    POST /api/shutdown                   -> {"ok": true, "message": "..."} (stops the agent itself)
 All endpoints except /api/ping require the header "X-ChamberKeep-Token".
 """
 
@@ -34,6 +35,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -44,7 +46,7 @@ AGENT_LOG_PATH = os.path.join(SCRIPT_DIR, "chamberkeep-agent.log")
 
 log = logging.getLogger("chamberkeep-agent")
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 
 class AgentHTTPServer(ThreadingHTTPServer):
@@ -111,6 +113,11 @@ class AgentHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._authorized():
             self._deny()
+            return
+        if self.path == "/api/shutdown":
+            log.info("shutdown requested")
+            self._send(200, {"ok": True, "message": "agent shutting down"})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
             return
         command = self.server.oc
         handlers = {
