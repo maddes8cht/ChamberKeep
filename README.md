@@ -46,17 +46,18 @@ interprets the JSON output.
 1. Start the agent: `python chamberkeep-agent.py` (or use the "Start agent
    now" button / "Start the local agent when ChamberKeep starts" option in the
    settings). The agent prints its port and access token on first start.
-2. The agent binds to `0.0.0.0` by default (token-protected). To reach it
-   from another PC, either:
-   - **SSH tunnel (recommended)**: install Windows OpenSSH Server, configure
-     key-based login, and open only port 22 in the firewall. The SSH session
-     is used purely as an encrypted tunnel - commands still run inside the
-     interactive agent, so the server keeps the same context as a locally
-     started one.
-   - **Direct LAN**: the agent already listens on all interfaces; just open
-     the agent port in the firewall. Simpler, but exposes the agent
-     (token-protected) directly on the network. Use `--host 127.0.0.1` to
-     restrict the agent to local connections only.
+2. The agent binds to `0.0.0.0` by default (token-protected). How exposed it
+   must be depends on the transport:
+   - **SSH tunnel (recommended)**: the tunnel connects to the agent via
+     `127.0.0.1` on the target, so a local-only bind (`--host 127.0.0.1`)
+     suffices. Install Windows OpenSSH Server, configure key-based login,
+     and open only port 22 in the firewall. The SSH session is used purely as
+     an encrypted tunnel - commands still run inside the interactive agent,
+     so the server keeps the same context as a locally started one.
+   - **Direct LAN**: the client reaches the agent directly over the network,
+     so it must be reachable on a network interface (the `0.0.0.0` default).
+     Just open the agent port in the firewall. Simpler, but exposes the
+     agent (token-protected) directly on the network.
 
 **Client PC (runs the tray):**
 1. In settings -> "Remote": enable remote control, choose the transport,

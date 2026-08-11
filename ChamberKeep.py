@@ -42,7 +42,7 @@ SERVE_LOG_PATH = os.path.join(SCRIPT_DIR, "chamberkeep-serve.log")
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 APP_NAME = "ChamberKeep"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 # Defaults for the environment variables OpenChamber reads.
@@ -503,9 +503,15 @@ class SSHTunnel:
                 return "SSH connection to %s failed: %s" % (self.config.remote_host, exc)
 
     def open_channel(self):
-        """Open a direct-tcpip channel to the agent on the remote host."""
+        """Open a direct-tcpip channel to the agent on the remote host.
+
+        The destination is 127.0.0.1 on the target, mirroring an ordinary
+        `ssh -L localhost:...:127.0.0.1:<agentPort>` forward. The agent thus
+        only needs to be reachable locally on the target PC, which is what the
+        original design intended.
+        """
         transport = self._client.get_transport()
-        target = (self.config.remote_host, self.config.remote_agent_port)
+        target = ("127.0.0.1", self.config.remote_agent_port)
         source = ("127.0.0.1", 0)
         channel = transport.open_channel("direct-tcpip", target, source)
         channel.settimeout(30)

@@ -40,7 +40,7 @@ AGENT_LOG_PATH = os.path.join(SCRIPT_DIR, "chamberkeep-agent.log")
 
 log = logging.getLogger("chamberkeep-agent")
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 
 class AgentHTTPServer(ThreadingHTTPServer):
@@ -146,6 +146,9 @@ def main():
         "--host",
         default=None,
         help="bind address (default 0.0.0.0 for remote access; use 127.0.0.1 to restrict to the local machine)",
+    )
+    parser.add_argument(
+        "--version", action="version", version="chamberkeep-agent %s" % VERSION
     )
     args = parser.parse_args()
 
