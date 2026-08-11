@@ -119,7 +119,7 @@ class Config:
         self.env_overrides = dict(data.get("env_overrides") or {})
         # local agent (target side)
         self.start_agent = bool(data.get("start_agent", False))
-        self.agent_port = int(data.get("agent_port", 8060))
+        self.agent_port = int(data.get("agent_port", 8040))
         self.agent_token = str(data.get("agent_token", "") or "")
         # remote target (client side)
         self.remote_enabled = bool(data.get("remote_enabled", False))
@@ -127,7 +127,7 @@ class Config:
         self.remote_host = str(data.get("remote_host", "") or "")
         self.remote_user = str(data.get("remote_user", "") or "")
         self.remote_ssh_port = int(data.get("remote_ssh_port", 22))
-        self.remote_agent_port = int(data.get("remote_agent_port", 8060))
+        self.remote_agent_port = int(data.get("remote_agent_port", 8040))
         self.remote_password = str(data.get("remote_password", "") or "")
         self.cli_port = None
         self._lock = threading.RLock()

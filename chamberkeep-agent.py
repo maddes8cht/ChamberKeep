@@ -10,7 +10,7 @@ SSH session.
 
 Usage:
     python chamberkeep-agent.py                 # 127.0.0.1:<config agent_port>
-    python chamberkeep-agent.py --port 8060
+    python chamberkeep-agent.py --port 8040
     python chamberkeep-agent.py --host 0.0.0.0  # accept direct-LAN connections
 
 The agent binds to 127.0.0.1 by default. Reach it from another PC over an
