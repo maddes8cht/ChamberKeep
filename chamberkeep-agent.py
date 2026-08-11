@@ -9,9 +9,13 @@ environment as a locally started one - unlike commands executed through an
 SSH session.
 
 Usage:
-    python chamberkeep-agent.py                 # 0.0.0.0:<config agent_port>
+    python chamberkeep-agent.py                 # 127.0.0.1:<config agent_port>
     python chamberkeep-agent.py --port 8060
-    python chamberkeep-agent.py --host 127.0.0.1  # restrict to local connections
+    python chamberkeep-agent.py --host 0.0.0.0  # accept direct-LAN connections
+
+The agent binds to 127.0.0.1 by default. Reach it from another PC over an
+SSH tunnel (forward to 127.0.0.1:<port>), or use --host 0.0.0.0 to allow
+direct LAN access (token-protected).
 
 The access token is generated on first start, printed to the console and
 stored in chamberkeep.json. Configure the matching token in the remote
@@ -145,7 +149,7 @@ def main():
     parser.add_argument(
         "--host",
         default=None,
-        help="bind address (default 0.0.0.0 for remote access; use 127.0.0.1 to restrict to the local machine)",
+        help="bind address (default 127.0.0.1; use 0.0.0.0 only for direct-LAN access)",
     )
     parser.add_argument(
         "--version", action="version", version="chamberkeep-agent %s" % VERSION
@@ -155,7 +159,7 @@ def main():
     config = Config.load()
     token = config.ensure_agent_token()
     port = args.port or config.agent_port
-    host = args.host or "0.0.0.0"
+    host = args.host or "127.0.0.1"
 
     logging.basicConfig(
         filename=AGENT_LOG_PATH,

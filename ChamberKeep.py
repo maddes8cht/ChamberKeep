@@ -1396,6 +1396,32 @@ class SettingsDialog:
             variable=self.start_with_windows_var,
         ).grid(row=row, column=1, sticky="w")
         row += 1
+        self._section(self.body, "Local agent").grid(
+            row=row, column=0, columnspan=3
+        )
+        row += 1
+        agent_check = tk.Checkbutton(
+            self.body,
+            text="Start the local agent when ChamberKeep starts",
+            variable=self.start_agent_var,
+        )
+        agent_check.grid(row=row, column=1, sticky="w")
+        ToolTip(
+            agent_check,
+            "Runs chamberkeep-agent on this PC so another PC can control "
+            "this ChamberKeep remotely. The agent must run on the PC that "
+            "receives the connection (the target), not on the controlling PC.",
+        )
+        row += 1
+        self._add_label(row, 0, "Agent port")
+        tk.Entry(self.body, textvariable=self.agent_port_var, width=30).grid(
+            row=row, column=1, sticky="we"
+        )
+        row += 1
+        tk.Button(
+            self.body, text="Start agent now", command=self.on_start_agent
+        ).grid(row=row, column=1, sticky="w", pady=(8, 0))
+        row += 1
 
     def _build_remote_tab(self):
         row = 0
@@ -1474,25 +1500,6 @@ class SettingsDialog:
             self.body, text="Test connection...", command=self.on_test_remote
         ).grid(row=row, column=1, sticky="w", pady=(8, 0))
         row += 1
-
-        self._section(self.body, "Local agent").grid(
-            row=row, column=0, columnspan=3
-        )
-        row += 1
-        tk.Checkbutton(
-            self.body,
-            text="Start the local agent when ChamberKeep starts",
-            variable=self.start_agent_var,
-        ).grid(row=row, column=1, sticky="w")
-        row += 1
-        self._add_label(row, 0, "Agent port")
-        tk.Entry(self.body, textvariable=self.agent_port_var, width=30).grid(
-            row=row, column=1, sticky="we"
-        )
-        row += 1
-        tk.Button(
-            self.body, text="Start agent now", command=self.on_start_agent
-        ).grid(row=row, column=1, sticky="w", pady=(8, 0))
 
     def _add_label(self, row, column, text):
         tk.Label(self.body, text=text, anchor="w").grid(
