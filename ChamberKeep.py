@@ -352,7 +352,7 @@ class LocalOpenChamber(OpenChamberBase):
         proc, err = self._run(
             ["restart", "--port", str(port)],
             env=self.config.build_serve_env(),
-            timeout=60,
+            timeout=120,
         )
         if err:
             return False, err
@@ -539,8 +539,8 @@ class RemoteOpenChamber(OpenChamberBase):
         return self._port if self._port else fallback
 
     def _timeout(self, method):
-        """Longer timeout for update, which may block for ~2 minutes."""
-        return 180 if method == "update" else 30
+        """Longer timeouts for slow operations (update, restart)."""
+        return {"update": 180, "restart": 120}.get(method, 30)
 
     def _transport_label(self):
         return "ssh" if self._tunnel is not None else "lan"

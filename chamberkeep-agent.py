@@ -9,9 +9,9 @@ environment as a locally started one - unlike commands executed through an
 SSH session.
 
 Usage:
-    python chamberkeep-agent.py                 # 127.0.0.1:<config agent_port>
+    python chamberkeep-agent.py                 # 0.0.0.0:<config agent_port>
     python chamberkeep-agent.py --port 8060
-    python chamberkeep-agent.py --host 0.0.0.0  # allow direct-LAN access
+    python chamberkeep-agent.py --host 127.0.0.1  # restrict to local connections
 
 The access token is generated on first start, printed to the console and
 stored in chamberkeep.json. Configure the matching token in the remote
@@ -64,11 +64,14 @@ class AgentHandler(BaseHTTPRequestHandler):
 
     def _send(self, code, obj):
         body = json.dumps(obj).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            log.info("client disconnected while sending response")
 
     def _authorized(self):
         provided = self.headers.get("X-ChamberKeep-Token", "")
@@ -142,14 +145,14 @@ def main():
     parser.add_argument(
         "--host",
         default=None,
-        help="bind address (default 127.0.0.1; use 0.0.0.0 only for direct-LAN access)",
+        help="bind address (default 0.0.0.0 for remote access; use 127.0.0.1 to restrict to the local machine)",
     )
     args = parser.parse_args()
 
     config = Config.load()
     token = config.ensure_agent_token()
     port = args.port or config.agent_port
-    host = args.host or "127.0.0.1"
+    host = args.host or "0.0.0.0"
 
     logging.basicConfig(
         filename=AGENT_LOG_PATH,
