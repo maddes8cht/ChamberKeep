@@ -422,6 +422,10 @@ class _TunnelHTTPConnection(http.client.HTTPConnection):
     def connect(self):
         channel = self._tunnel.open_channel()
         self.sock = _ChannelSocket(channel)
+        # Apply the per-method HTTP timeout to the channel so slow operations
+        # (update/restart) are not capped at the channel's default of 30 s.
+        if self.timeout is not None:
+            self.sock.settimeout(self.timeout)
 
 
 class SSHTunnel:
@@ -514,6 +518,9 @@ class SSHTunnel:
         target = ("127.0.0.1", self.config.remote_agent_port)
         source = ("127.0.0.1", 0)
         channel = transport.open_channel("direct-tcpip", target, source)
+        # Default channel read timeout; the caller (via _TunnelHTTPConnection)
+        # overrides this per method so slow operations like update can run
+        # longer than 30 s.
         channel.settimeout(30)
         return channel
 
@@ -546,7 +553,7 @@ class RemoteOpenChamber(OpenChamberBase):
 
     def _timeout(self, method):
         """Longer timeouts for slow operations (update, restart)."""
-        return {"update": 180, "restart": 120}.get(method, 30)
+        return {"update": 240, "restart": 120}.get(method, 30)
 
     def _transport_label(self):
         return "ssh" if self._tunnel is not None else "lan"
@@ -790,7 +797,7 @@ def launch_agent(port):
     agent_script = os.path.join(SCRIPT_DIR, "chamberkeep-agent.py")
     try:
         subprocess.Popen(
-            [sys.executable, agent_script],
+            [sys.executable, agent_script, "--port", str(port)],
             creationflags=CREATE_NO_WINDOW,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -913,7 +920,12 @@ class TrayApp:
         with self._refresh_lock:
             if self.icon is None:
                 return
-            self.agent_running = agent_running(self.config.agent_port)
+            # Only poll the local agent when actually controlling this PC;
+            # in remote mode the menu hides the agent section anyway.
+            if self.config.remote_enabled and self.config.remote_host:
+                self.agent_running = False
+            else:
+                self.agent_running = agent_running(self.config.agent_port)
             data, err = self.oc.status()
             if self._update_mode:
                 self._refresh_during_update(data, err)
@@ -1752,9 +1764,10 @@ class SettingsDialog:
         apply_env_override(self.config, key, value, bool_value)
 
     def on_save(self):
-        port, poll, remote = self._validate()
-        if port is None:
+        result = self._validate()
+        if not result:
             return
+        port, poll, remote = result
         if self.config.cli_port is None:
             self.config.port = port
         self.config.poll_seconds = poll
