@@ -874,7 +874,7 @@ class TrayApp:
             status_text = "Status: %s" % state_label
             if self.status_info:
                 status_text += " - %s" % self.status_info
-        return pystray.Menu(
+        items = [
             pystray.MenuItem("Target: %s" % self._target_label(), None, enabled=False),
             pystray.MenuItem(status_text, None, enabled=False),
             pystray.Menu.SEPARATOR,
@@ -882,23 +882,31 @@ class TrayApp:
             pystray.MenuItem("Stop Server", self.on_stop, enabled=not updating),
             pystray.MenuItem("Restart Server", self.on_restart, enabled=not updating),
             pystray.MenuItem("Update", self.on_update, enabled=not updating),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem(
-                "Agent: Running" if self.agent_running else "Agent: Stopped",
-                None,
-                enabled=False,
-            ),
-            pystray.MenuItem(
-                "Start Agent", self.on_start_agent, enabled=not self.agent_running
-            ),
-            pystray.MenuItem(
-                "Stop Agent", self.on_stop_agent, enabled=self.agent_running
-            ),
+        ]
+        # The local agent only exists on this PC; when controlling a remote
+        # server the agent lives on the target, so hide this section entirely.
+        if not (self.config.remote_enabled and self.config.remote_host):
+            items += [
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    "Agent: Running" if self.agent_running else "Agent: Stopped",
+                    None,
+                    enabled=False,
+                ),
+                pystray.MenuItem(
+                    "Start Agent", self.on_start_agent, enabled=not self.agent_running
+                ),
+                pystray.MenuItem(
+                    "Stop Agent", self.on_stop_agent, enabled=self.agent_running
+                ),
+            ]
+        items += [
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings...", self.on_settings),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", self.on_exit),
-        )
+        ]
+        return pystray.Menu(*items)
 
     def refresh(self):
         """Poll openchamber status and update icon, tooltip and menu."""
