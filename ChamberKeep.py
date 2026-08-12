@@ -12,15 +12,19 @@ settings dialog with a lamp indicator showing the source of each value
 """
 
 import argparse
+import hmac
+import http.client
 import json
 import os
 import queue
+import secrets
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.ttk as ttk
 from tkinter import messagebox
 
 try:
@@ -38,7 +42,7 @@ SERVE_LOG_PATH = os.path.join(SCRIPT_DIR, "chamberkeep-serve.log")
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 APP_NAME = "ChamberKeep"
-VERSION = "0.1.0"
+VERSION = "0.3.0"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 # Defaults for the environment variables OpenChamber reads.
@@ -113,8 +117,27 @@ class Config:
         self.start_with_windows = bool(data.get("start_with_windows", False))
         self.poll_seconds = int(data.get("poll_seconds", 5))
         self.env_overrides = dict(data.get("env_overrides") or {})
+        # local agent (target side)
+        self.start_agent = bool(data.get("start_agent", False))
+        self.agent_port = int(data.get("agent_port", 8040))
+        self.agent_token = str(data.get("agent_token", "") or "")
+        # remote target (client side)
+        self.remote_enabled = bool(data.get("remote_enabled", False))
+        self.remote_mode = str(data.get("remote_mode", "ssh") or "ssh")
+        self.remote_host = str(data.get("remote_host", "") or "")
+        self.remote_user = str(data.get("remote_user", "") or "")
+        self.remote_ssh_port = int(data.get("remote_ssh_port", 22))
+        self.remote_agent_port = int(data.get("remote_agent_port", 8040))
+        self.remote_password = str(data.get("remote_password", "") or "")
         self.cli_port = None
         self._lock = threading.RLock()
+
+    def ensure_agent_token(self):
+        """Return the agent token, generating and persisting one if empty."""
+        if not self.agent_token:
+            self.agent_token = secrets.token_urlsafe(24)
+            self.save()
+        return self.agent_token
 
     @classmethod
     def load(cls, path=CONFIG_PATH):
@@ -135,6 +158,16 @@ class Config:
             "auto_start_server": self.auto_start_server,
             "start_with_windows": self.start_with_windows,
             "poll_seconds": self.poll_seconds,
+            "start_agent": self.start_agent,
+            "agent_port": self.agent_port,
+            "agent_token": self.agent_token,
+            "remote_enabled": self.remote_enabled,
+            "remote_mode": self.remote_mode,
+            "remote_host": self.remote_host,
+            "remote_user": self.remote_user,
+            "remote_ssh_port": self.remote_ssh_port,
+            "remote_agent_port": self.remote_agent_port,
+            "remote_password": self.remote_password,
             "env_overrides": {
                 key: value
                 for key, value in self.env_overrides.items()
@@ -207,8 +240,45 @@ def _find_openchamber():
     return found if found else "openchamber"
 
 
-class OpenChamber:
-    """Thin wrapper around the openchamber CLI commands."""
+class OpenChamberBase:
+    """Common contract for controlling an OpenChamber server.
+
+    The tray app depends only on this interface, so local and remote
+    control are interchangeable:
+
+      - status()        -> (data_or_None, err_or_None); data is the raw
+                           openchamber status JSON document.
+      - start()         -> (ok, message)
+      - stop()          -> (ok, message)
+      - restart()       -> (ok, message)
+      - update()        -> (ok, message, updated) with updated True when a
+                           real update was installed, False when already up
+                           to date, None when unknown.
+      - resolve_port()  -> port used to interpret status output.
+    """
+
+    def status(self):
+        raise NotImplementedError
+
+    def start(self):
+        raise NotImplementedError
+
+    def stop(self):
+        raise NotImplementedError
+
+    def restart(self):
+        raise NotImplementedError
+
+    def update(self):
+        raise NotImplementedError
+
+    def resolve_port(self, fallback):
+        """Return the port that status output should be interpreted with."""
+        return fallback
+
+
+class LocalOpenChamber(OpenChamberBase):
+    """Thin wrapper around the local openchamber CLI commands."""
 
     def __init__(self, config):
         self.config = config
@@ -250,32 +320,327 @@ class OpenChamber:
         """Launch the server as an OpenChamber daemon (non-blocking)."""
         args = ["serve", "--port", str(self.config.port)]
         env = self.config.build_serve_env()
-        with open(SERVE_LOG_PATH, "a", encoding="utf-8") as log:
-            subprocess.Popen(
-                [self._exe, *args],
-                env=env,
-                stdout=log,
-                stderr=log,
-                creationflags=CREATE_NO_WINDOW,
-            )
+        try:
+            with open(SERVE_LOG_PATH, "a", encoding="utf-8") as log:
+                subprocess.Popen(
+                    [self._exe, *args],
+                    env=env,
+                    stdout=log,
+                    stderr=log,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+        except OSError as exc:
+            return False, "Failed to launch server: %s" % exc
+        return True, "Server start requested on port %s" % self.config.port
 
     def stop(self, port=None):
         """Stop the daemon on the given port (default: configured port)."""
         port = port or self.config.port
-        return self._run(["stop", "--port", str(port)])
+        proc, err = self._run(["stop", "--port", str(port)])
+        if err:
+            return False, err
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            return False, "Failed to stop server%s" % (
+                ": " + detail if detail else ""
+            )
+        return True, "Server stopped on port %s" % port
 
     def restart(self, port=None):
         """Restart the daemon, re-applying the configured environment."""
         port = port or self.config.port
-        return self._run(
+        proc, err = self._run(
             ["restart", "--port", str(port)],
             env=self.config.build_serve_env(),
-            timeout=60,
+            timeout=120,
         )
+        if err:
+            return False, err
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            return False, "Failed to restart server%s" % (
+                ": " + detail if detail else ""
+            )
+        return True, "Server restarted on port %s" % port
 
     def update(self):
-        """Check for and install OpenChamber updates."""
-        return self._run(["update", "--json"], timeout=120)
+        """Check for and install OpenChamber updates.
+
+        Returns (ok, message, updated): updated is True when a real update
+        was installed, False when already up to date, None on failure.
+        """
+        proc, err = self._run(["update", "--json"], timeout=120)
+        if err:
+            return False, err, None
+        try:
+            data = json.loads(proc.stdout)
+            current = data.get("currentVersion", "?")
+            latest = data.get("latestVersion", "?")
+            if data.get("updated"):
+                return True, "OpenChamber updated %s -> %s" % (current, latest), True
+            return True, "OpenChamber is up to date (%s)" % current, False
+        except json.JSONDecodeError:
+            detail = proc.stdout.strip() or "unknown"
+            return proc.returncode == 0, detail, None
+
+
+class _ChannelSocket:
+    """Socket adapter that forwards bytes over a paramiko channel."""
+
+    def __init__(self, channel):
+        self._channel = channel
+
+    def connect(self, address):
+        pass
+
+    def sendall(self, data):
+        self._channel.sendall(data)
+
+    def recv(self, bufsize):
+        return self._channel.recv(bufsize)
+
+    def makefile(self, mode="r", buffering=None):
+        return self._channel.makefile(mode)
+
+    def settimeout(self, timeout):
+        self._channel.settimeout(timeout)
+
+    def close(self):
+        self._channel.close()
+
+    def shutdown(self, how):
+        pass
+
+
+class _TunnelHTTPConnection(http.client.HTTPConnection):
+    """HTTP connection whose transport is a paramiko direct-tcpip channel."""
+
+    def __init__(self, tunnel, host, port, timeout=30):
+        self._tunnel = tunnel
+        super().__init__(host, port, timeout=timeout)
+
+    def connect(self):
+        channel = self._tunnel.open_channel()
+        self.sock = _ChannelSocket(channel)
+        # Apply the per-method HTTP timeout to the channel so slow operations
+        # (update/restart) are not capped at the channel's default of 30 s.
+        if self.timeout is not None:
+            self.sock.settimeout(self.timeout)
+
+
+class SSHTunnel:
+    """In-process SSH transport for the chamberkeep agent connection.
+
+    Unlike executing commands through an SSH session (which on Windows runs
+    in a non-interactive context), this only forwards TCP connections to the
+    agent on the remote host. All openchamber commands still run inside the
+    interactive agent process, so context, environment and UAC behave like a
+    locally started server. Supports password or key-based authentication.
+    """
+
+    RETRY_DELAY = 10.0  # seconds between connection attempts after a failure
+
+    def __init__(self, config):
+        self.config = config
+        self._client = None
+        self._last_failure = 0.0
+        self._lock = threading.RLock()
+
+    def connect(self):
+        """(Re-)establish the SSH connection, returning None or an error."""
+        with self._lock:
+            if self._client is not None and self._client.get_transport() is not None:
+                if self._client.get_transport().is_active():
+                    return None
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+            now = time.monotonic()
+            if now - self._last_failure < self.RETRY_DELAY:
+                return "SSH connection not established yet (will retry)"
+            try:
+                import paramiko
+            except ImportError:
+                self._last_failure = time.monotonic()
+                return (
+                    "paramiko is not installed. Install it with "
+                    "`pip install paramiko` (in the same Python that runs "
+                    "ChamberKeep) to use SSH control."
+                )
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                try:
+                    client.load_system_host_keys()
+                except OSError:
+                    pass
+                client.connect(
+                    hostname=self.config.remote_host,
+                    port=self.config.remote_ssh_port,
+                    username=self.config.remote_user or None,
+                    password=self.config.remote_password or None,
+                    timeout=10,
+                    banner_timeout=10,
+                    auth_timeout=10,
+                )
+                self._client = client
+                self._last_failure = 0.0
+                return None
+            except paramiko.AuthenticationException:
+                self._last_failure = time.monotonic()
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                return (
+                    "SSH authentication failed for %s@%s: wrong password/key"
+                    % (self.config.remote_user, self.config.remote_host)
+                )
+            except Exception as exc:
+                self._last_failure = time.monotonic()
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                return "SSH connection to %s failed: %s" % (self.config.remote_host, exc)
+
+    def open_channel(self):
+        """Open a direct-tcpip channel to the agent on the remote host.
+
+        The destination is 127.0.0.1 on the target, mirroring an ordinary
+        `ssh -L localhost:...:127.0.0.1:<agentPort>` forward. The agent thus
+        only needs to be reachable locally on the target PC, which is what the
+        original design intended.
+        """
+        transport = self._client.get_transport()
+        target = ("127.0.0.1", self.config.remote_agent_port)
+        source = ("127.0.0.1", 0)
+        channel = transport.open_channel("direct-tcpip", target, source)
+        # Default channel read timeout; the caller (via _TunnelHTTPConnection)
+        # overrides this per method so slow operations like update can run
+        # longer than 30 s.
+        channel.settimeout(30)
+        return channel
+
+    def close(self):
+        with self._lock:
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+
+
+class RemoteOpenChamber(OpenChamberBase):
+    """Backend that controls the server through the chamberkeep agent.
+
+    In "ssh" mode all traffic flows over an SSH tunnel (SSHTunnel) so the
+    openchamber commands run in the interactive context on the target. In
+    "lan" mode the agent is reached directly on the local network.
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self._tunnel = SSHTunnel(config) if config.remote_mode == "ssh" else None
+        self._port = None
+
+    def resolve_port(self, fallback):
+        """Use the port reported by the agent once known, else the fallback."""
+        return self._port if self._port else fallback
+
+    def _timeout(self, method):
+        """Longer timeouts for slow operations (update, restart)."""
+        return {"update": 240, "restart": 120}.get(method, 30)
+
+    def _transport_label(self):
+        return "ssh" if self._tunnel is not None else "lan"
+
+    def _request(self, method, data=None):
+        """Perform one authenticated request; returns (payload, error)."""
+        try:
+            if self._tunnel is not None:
+                err = self._tunnel.connect()
+                if err:
+                    return None, err
+                conn = _TunnelHTTPConnection(
+                    self._tunnel,
+                    "127.0.0.1",
+                    self.config.remote_agent_port,
+                    timeout=self._timeout(method),
+                )
+            else:
+                conn = http.client.HTTPConnection(
+                    self.config.remote_host,
+                    self.config.remote_agent_port,
+                    timeout=self._timeout(method),
+                )
+            headers = {"X-ChamberKeep-Token": self.config.agent_token}
+            body = json.dumps(data).encode() if data is not None else None
+            verb = "GET" if method == "status" else "POST"
+            conn.request(verb, "/api/" + method, body=body, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8", "replace")
+            conn.close()
+            if resp.status == 401:
+                return None, "agent rejected the token (check settings)"
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                return None, "unparseable agent response: %s" % raw.strip()
+            return payload, None
+        except OSError as exc:
+            return None, "agent unreachable over %s: %s" % (
+                self._transport_label(), exc,
+            )
+        except Exception as exc:
+            return None, "remote request failed: %s" % exc
+
+    def _action_error(self, payload, fallback):
+        return payload.get("error") or payload.get("message") or fallback
+
+    def status(self):
+        payload, err = self._request("status")
+        if err:
+            return None, err
+        if not payload.get("ok"):
+            return None, self._action_error(payload, "agent reported an error")
+        self._port = payload.get("port") or self._port
+        return payload.get("data"), None
+
+    def start(self):
+        payload, err = self._request("start")
+        if err:
+            return False, err
+        if not payload.get("ok"):
+            return False, self._action_error(payload, "start failed")
+        return True, payload.get("message") or "Server start requested"
+
+    def stop(self):
+        payload, err = self._request("stop")
+        if err:
+            return False, err
+        if not payload.get("ok"):
+            return False, self._action_error(payload, "stop failed")
+        return True, payload.get("message") or "Server stopped"
+
+    def restart(self):
+        payload, err = self._request("restart")
+        if err:
+            return False, err
+        if not payload.get("ok"):
+            return False, self._action_error(payload, "restart failed")
+        return True, payload.get("message") or "Server restarted"
+
+    def update(self):
+        payload, err = self._request("update")
+        if err:
+            return False, err, None
+        if not payload.get("ok"):
+            return False, self._action_error(payload, "update failed"), None
+        return True, payload.get("message") or "Update finished", payload.get("updated")
 
 
 def resolve_state(data, port):
@@ -304,6 +669,19 @@ def resolve_state(data, port):
     other = sorted(str(i.get("port")) for i in instances if i.get("port"))
     running = ", ".join(other) if other else "none"
     return "ambiguous", "no instance on port %s (running: %s)" % (port, running)
+
+
+def test_remote(config):
+    """Try to reach the configured agent; returns (ok, message)."""
+    try:
+        remote = RemoteOpenChamber(config)
+        data, err = remote.status()
+        if err:
+            return False, err
+        state, info = resolve_state(data, remote.resolve_port(config.port))
+        return True, "%s (%s)" % (STATE_LABELS.get(state, state), info)
+    except Exception as exc:
+        return False, str(exc)
 
 
 def _registry_command():
@@ -370,12 +748,71 @@ def _acquire_singleton():
         return True
 
 
+def agent_running(port):
+    """Return True when a chamberkeep-agent answers on 127.0.0.1:port."""
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+        conn.request("GET", "/api/ping")
+        resp = conn.getresponse()
+        ok = resp.status == 200
+        resp.read()
+        conn.close()
+        return ok
+    except OSError:
+        return False
+
+
+def stop_agent(port, token):
+    """Ask the chamberkeep-agent on `port` to shut itself down.
+
+    Returns (ok, message). Works no matter how the agent was started
+    (terminal or background), since it is just an authenticated request.
+    """
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "POST", "/api/shutdown", headers={"X-ChamberKeep-Token": token}
+        )
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", "replace")
+        conn.close()
+        try:
+            payload = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if resp.status == 200 and payload.get("ok"):
+            return True, "Agent stopped"
+        return False, payload.get("error") or "shutdown failed (%s)" % resp.status
+    except OSError as exc:
+        return False, "Agent unreachable: %s" % exc
+
+
+def launch_agent(port):
+    """Start chamberkeep-agent.py on `port` if it is not running.
+
+    Returns a short status string for the caller.
+    """
+    if agent_running(port):
+        return "already running on port %s" % port
+    agent_script = os.path.join(SCRIPT_DIR, "chamberkeep-agent.py")
+    try:
+        subprocess.Popen(
+            [sys.executable, agent_script, "--port", str(port)],
+            creationflags=CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return "started on port %s" % port
+    except OSError as exc:
+        return "failed to start: %s" % exc
+
+
 class TrayApp:
     """Systray icon that reflects and controls the OpenChamber server."""
 
     def __init__(self, config):
         self.config = config
-        self.oc = OpenChamber(config)
+        self.reload_backend()
         self.icon = None
         self.state = "unknown"
         self.status_info = ""
@@ -395,6 +832,18 @@ class TrayApp:
         self._update_blink = False
         self._update_was_running = False
         self._update_normal_state = "stopped"
+        self.agent_running = agent_running(self.config.agent_port)
+
+    def reload_backend(self):
+        """Re-create the control backend from the current config.
+
+        Local CLI when no remote target is configured, otherwise the agent
+        connection over SSH tunnel or direct LAN.
+        """
+        if self.config.remote_enabled and self.config.remote_host:
+            self.oc = RemoteOpenChamber(self.config)
+        else:
+            self.oc = LocalOpenChamber(self.config)
 
     # --- icon / menu ------------------------------------------------------
 
@@ -416,6 +865,12 @@ class TrayApp:
                 pass
         return self.create_image(ICON_COLORS.get(state, "gray"))
 
+    def _target_label(self):
+        """Short human-readable label of the controlled server."""
+        if self.config.remote_enabled and self.config.remote_host:
+            return "remote %s" % self.config.remote_host
+        return "local"
+
     def build_menu(self):
         """Build the tray menu reflecting the current state."""
         updating = self._update_mode
@@ -426,24 +881,51 @@ class TrayApp:
             status_text = "Status: %s" % state_label
             if self.status_info:
                 status_text += " - %s" % self.status_info
-        return pystray.Menu(
+        items = [
+            pystray.MenuItem("Target: %s" % self._target_label(), None, enabled=False),
             pystray.MenuItem(status_text, None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Start Server", self.on_start, enabled=not updating),
             pystray.MenuItem("Stop Server", self.on_stop, enabled=not updating),
             pystray.MenuItem("Restart Server", self.on_restart, enabled=not updating),
             pystray.MenuItem("Update", self.on_update, enabled=not updating),
+        ]
+        # The local agent only exists on this PC; when controlling a remote
+        # server the agent lives on the target, so hide this section entirely.
+        if not (self.config.remote_enabled and self.config.remote_host):
+            items += [
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem(
+                    "Agent: Running" if self.agent_running else "Agent: Stopped",
+                    None,
+                    enabled=False,
+                ),
+                pystray.MenuItem(
+                    "Start Agent", self.on_start_agent, enabled=not self.agent_running
+                ),
+                pystray.MenuItem(
+                    "Stop Agent", self.on_stop_agent, enabled=self.agent_running
+                ),
+            ]
+        items += [
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings...", self.on_settings),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", self.on_exit),
-        )
+        ]
+        return pystray.Menu(*items)
 
     def refresh(self):
         """Poll openchamber status and update icon, tooltip and menu."""
         with self._refresh_lock:
             if self.icon is None:
                 return
+            # Only poll the local agent when actually controlling this PC;
+            # in remote mode the menu hides the agent section anyway.
+            if self.config.remote_enabled and self.config.remote_host:
+                self.agent_running = False
+            else:
+                self.agent_running = agent_running(self.config.agent_port)
             data, err = self.oc.status()
             if self._update_mode:
                 self._refresh_during_update(data, err)
@@ -451,7 +933,7 @@ class TrayApp:
             if err:
                 state, info = "error", err
             else:
-                state, info = resolve_state(data, self.config.port)
+                state, info = resolve_state(data, self.oc.resolve_port(self.config.port))
             self._apply_normal_display(state, info)
 
     def _refresh_during_update(self, data, err):
@@ -564,7 +1046,9 @@ class TrayApp:
             try:
                 data, err = self.oc.status()
                 if not err:
-                    state, _ = resolve_state(data, self.config.port)
+                    state, _ = resolve_state(
+                        data, self.oc.resolve_port(self.config.port)
+                    )
                     if state == "running":
                         return
                 self.oc.start()
@@ -602,53 +1086,41 @@ class TrayApp:
     def do_start(self):
         data, err = self.oc.status()
         if not err:
-            state, _ = resolve_state(data, self.config.port)
+            state, _ = resolve_state(data, self.oc.resolve_port(self.config.port))
             if state != "stopped":
                 return False, "Server already running on port %s" % self.config.port
-        self.oc.start()
+        ok, message = self.oc.start()
         time.sleep(1.5)
-        return True, "Server start requested on port %s" % self.config.port
+        return ok, message
 
     def do_stop(self):
-        proc, err = self.oc.stop()
-        if err:
-            return False, err
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()
-            return False, "Failed to stop server%s" % (
-                ": " + detail if detail else ""
-            )
-        return True, "Server stopped on port %s" % self.config.port
+        return self.oc.stop()
 
     def do_restart(self):
-        proc, err = self.oc.restart()
-        if err:
-            return False, err
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()
-            return False, "Failed to restart server%s" % (
-                ": " + detail if detail else ""
-            )
-        return True, "Server restarted on port %s" % self.config.port
+        return self.oc.restart()
+
+    def do_start_agent(self):
+        result = launch_agent(self.config.agent_port)
+        ok = "failed" not in result
+        time.sleep(0.5)
+        return ok, "Agent: %s" % result
+
+    def do_stop_agent(self):
+        token = self.config.ensure_agent_token()
+        ok, message = stop_agent(self.config.agent_port, token)
+        time.sleep(1.0)
+        return ok, "Agent: %s" % message
 
     def do_update(self):
-        proc, err = self.oc.update()
-        if err:
+        ok, message, updated = self.oc.update()
+        if not ok:
             self._update_mode = False
-            return False, err
-        try:
-            data = json.loads(proc.stdout)
-            current = data.get("currentVersion", "?")
-            latest = data.get("latestVersion", "?")
-            if data.get("updated"):
-                self._update_command_done = True
-                return True, "OpenChamber updated %s -> %s" % (current, latest)
+            return False, message
+        if updated:
+            self._update_command_done = True
+        else:
             self._update_mode = False
-            return True, "OpenChamber is up to date (%s)" % current
-        except json.JSONDecodeError:
-            detail = proc.stdout.strip() or "unknown"
-            self._update_mode = False
-            return proc.returncode == 0, detail
+        return True, message
 
     def on_start(self, icon, item):
         self._spawn(self.do_start)
@@ -658,6 +1130,12 @@ class TrayApp:
 
     def on_restart(self, icon, item):
         self._spawn(self.do_restart)
+
+    def on_start_agent(self, icon, item):
+        self._spawn(self.do_start_agent)
+
+    def on_stop_agent(self, icon, item):
+        self._spawn(self.do_stop_agent)
 
     def on_update(self, icon, item):
         self._enter_update_mode()
@@ -704,15 +1182,21 @@ class TrayApp:
 
     # --- lifecycle --------------------------------------------------------
 
+    def _ensure_agent(self):
+        """Start the local chamberkeep-agent if configured and not running."""
+        if self.config.start_agent:
+            launch_agent(self.config.agent_port)
+
     def start(self):
         """Start the Tk main loop (main thread) and the tray icon (detached)."""
         if self.config.start_with_windows and not autostart_enabled():
             set_autostart(True)
+        self._ensure_agent()
         threading.Thread(target=self._poll_loop, daemon=True).start()
         if self.config.auto_start_server:
             data, err = self.oc.status()
             if not err:
-                state, _ = resolve_state(data, self.config.port)
+                state, _ = resolve_state(data, self.oc.resolve_port(self.config.port))
                 if state == "stopped":
                     self.oc.start()
         self._tk_root = tk.Tk()
@@ -721,7 +1205,7 @@ class TrayApp:
         self.icon = pystray.Icon(
             APP_NAME,
             self.create_icon("stopped"),
-            "%s - OpenChamber (port %s)" % (APP_NAME, self.config.port),
+            "%s - %s (port %s)" % (APP_NAME, self._target_label(), self.config.port),
             self.build_menu(),
         )
         self.refresh()
@@ -839,6 +1323,18 @@ class SettingsDialog:
             "OPENCODE_PORT": tk.StringVar(),
             "OPENCHAMBER_OPENCODE_HOSTNAME": tk.StringVar(),
         }
+        self.remote_enabled_var = tk.BooleanVar()
+        self.remote_mode_var = tk.StringVar()
+        self.remote_host_var = tk.StringVar()
+        self.remote_user_var = tk.StringVar()
+        self.remote_ssh_port_var = tk.StringVar()
+        self.remote_agent_port_var = tk.StringVar()
+        self.remote_password_var = tk.StringVar()
+        self.remote_token_var = tk.StringVar()
+        self.start_agent_var = tk.BooleanVar()
+        self.agent_port_var = tk.StringVar()
+        self.agent_status_var = tk.StringVar()
+        self.agent_toggle_btn = None
 
         self._build()
         self._populate()
@@ -858,11 +1354,32 @@ class SettingsDialog:
         return label
 
     def _build(self):
-        self.body = tk.Frame(self.dialog)
-        self.body.pack(fill="both", expand=True, padx=12, pady=8)
-        self.body.columnconfigure(1, weight=1)
+        self.notebook = ttk.Notebook(self.dialog)
+        self.notebook.pack(fill="both", expand=True, padx=12, pady=8)
+        self.server_tab = tk.Frame(self.notebook)
+        self.remote_tab = tk.Frame(self.notebook)
+        self.notebook.add(self.server_tab, text="Server")
+        self.notebook.add(self.remote_tab, text="Remote")
         self._lamp_tips = {}
 
+        self.body = self.server_tab
+        self.body.columnconfigure(1, weight=1)
+        self._build_server_tab()
+
+        self.body = self.remote_tab
+        self.body.columnconfigure(1, weight=1)
+        self._build_remote_tab()
+
+        buttons = tk.Frame(self.dialog)
+        buttons.pack(fill="x", padx=12, pady=8)
+        tk.Button(buttons, text="Save", width=12, command=self.on_save).pack(
+            side="right", padx=(6, 0)
+        )
+        tk.Button(buttons, text="Cancel", width=12, command=self.on_cancel).pack(
+            side="right"
+        )
+
+    def _build_server_tab(self):
         row = 0
         self._section(self.body, "Server").grid(row=row, column=0, columnspan=3)
         row += 1
@@ -879,12 +1396,12 @@ class SettingsDialog:
         host_frame = tk.Frame(self.body)
         host_frame.grid(row=row, column=1, sticky="w")
         for value, text in (
-            ("127.0.0.1", "Localhost only (127.0.0.1)"),
-            ("0.0.0.0", "Local network (0.0.0.0)"),
+            ("127.0.0.1", "Localhost (127.0.0.1)"),
+            ("0.0.0.0", "Local net (0.0.0.0)"),
         ):
             tk.Radiobutton(
                 host_frame, text=text, value=value, variable=self.host_var
-            ).pack(anchor="w")
+            ).pack(side="left", padx=(0, 12))
         self.host_lamp = self._lamp("OPENCHAMBER_HOST")
         self.host_lamp.grid(row=row, column=2, sticky="n")
         row += 1
@@ -898,17 +1415,16 @@ class SettingsDialog:
         row += 1
 
         self._add_label(row, 0, "UI password")
-        pw_frame = tk.Frame(self.body)
-        pw_frame.grid(row=row, column=1, sticky="we")
         tk.Entry(
-            pw_frame, textvariable=self.password_vars["value"], show="*", width=30
-        ).pack(fill="x")
-        tk.Label(pw_frame, text="Confirm:").pack(anchor="w", pady=(6, 0))
-        tk.Entry(
-            pw_frame, textvariable=self.password_vars["confirm"], show="*", width=30
-        ).pack(fill="x")
+            self.body, textvariable=self.password_vars["value"], show="*", width=30
+        ).grid(row=row, column=1, sticky="we")
         self.pw_lamp = self._lamp("OPENCHAMBER_UI_PASSWORD")
         self.pw_lamp.grid(row=row, column=2, sticky="n")
+        row += 1
+        self._add_label(row, 0, "Confirm")
+        tk.Entry(
+            self.body, textvariable=self.password_vars["confirm"], show="*", width=30
+        ).grid(row=row, column=1, sticky="we")
         row += 1
 
         self._section(self.body, "OpenCode integration").grid(
@@ -958,15 +1474,121 @@ class SettingsDialog:
             variable=self.start_with_windows_var,
         ).grid(row=row, column=1, sticky="w")
         row += 1
+        self._section(self.body, "Local agent").grid(
+            row=row, column=0, columnspan=3
+        )
+        row += 1
+        agent_check = tk.Checkbutton(
+            self.body,
+            text="Start the local agent when ChamberKeep starts",
+            variable=self.start_agent_var,
+        )
+        agent_check.grid(row=row, column=1, sticky="w")
+        ToolTip(
+            agent_check,
+            "Runs chamberkeep-agent on this PC so another PC can control "
+            "this ChamberKeep remotely. The agent must run on the PC that "
+            "receives the connection (the target), not on the controlling PC.",
+        )
+        row += 1
+        self._add_label(row, 0, "Agent port")
+        tk.Entry(self.body, textvariable=self.agent_port_var, width=30).grid(
+            row=row, column=1, sticky="we"
+        )
+        row += 1
+        self._add_label(row, 0, "Agent status")
+        agent_frame = tk.Frame(self.body)
+        agent_frame.grid(row=row, column=1, sticky="w")
+        tk.Label(agent_frame, textvariable=self.agent_status_var, width=9).pack(
+            side="left"
+        )
+        self.agent_toggle_btn = tk.Button(
+            agent_frame, text="Start agent", command=self.on_toggle_agent
+        )
+        self.agent_toggle_btn.pack(side="left", padx=(8, 0))
+        ToolTip(
+            self.agent_toggle_btn,
+            "Start the local chamberkeep-agent, or stop it if it is running. "
+            "Stopping sends /api/shutdown to the agent.",
+        )
 
-        buttons = tk.Frame(self.dialog)
-        buttons.pack(fill="x", padx=12, pady=8)
-        tk.Button(buttons, text="Save", width=12, command=self.on_save).pack(
-            side="right", padx=(6, 0)
+    def _build_remote_tab(self):
+        row = 0
+        self._section(self.body, "Remote control").grid(
+            row=row, column=0, columnspan=3
         )
-        tk.Button(buttons, text="Cancel", width=12, command=self.on_cancel).pack(
-            side="right"
+        row += 1
+        tk.Checkbutton(
+            self.body,
+            text="Control a remote OpenChamber server instead of the local one",
+            variable=self.remote_enabled_var,
+        ).grid(row=row, column=1, sticky="w")
+        row += 1
+
+        self._add_label(row, 0, "Transport")
+        mode_frame = tk.Frame(self.body)
+        mode_frame.grid(row=row, column=1, sticky="w")
+        tk.Radiobutton(
+            mode_frame, text="SSH tunnel (recommended)", value="ssh",
+            variable=self.remote_mode_var,
+        ).pack(anchor="w")
+        tk.Radiobutton(
+            mode_frame, text="Direct LAN", value="lan",
+            variable=self.remote_mode_var,
+        ).pack(anchor="w")
+        row += 1
+
+        self._add_label(row, 0, "Host")
+        tk.Entry(self.body, textvariable=self.remote_host_var, width=30).grid(
+            row=row, column=1, sticky="we"
         )
+        row += 1
+
+        self._add_label(row, 0, "User")
+        tk.Entry(self.body, textvariable=self.remote_user_var, width=30).grid(
+            row=row, column=1, sticky="we"
+        )
+        row += 1
+
+        self._add_label(row, 0, "SSH port")
+        tk.Entry(self.body, textvariable=self.remote_ssh_port_var, width=30).grid(
+            row=row, column=1, sticky="we"
+        )
+        row += 1
+
+        self._add_label(row, 0, "Agent port")
+        tk.Entry(self.body, textvariable=self.remote_agent_port_var, width=30).grid(
+            row=row, column=1, sticky="we"
+        )
+        row += 1
+
+        self._add_label(row, 0, "User password (target PC)")
+        pw_entry = tk.Entry(
+            self.body, textvariable=self.remote_password_var, show="*", width=30
+        )
+        pw_entry.grid(row=row, column=1, sticky="we")
+        ToolTip(
+            pw_entry,
+            "Login password of the user above on the target PC - the same one "
+            "used for `ssh user@host` in a terminal. Leave empty to use an "
+            "SSH key instead.",
+        )
+        row += 1
+
+        self._add_label(row, 0, "Agent token")
+        token_entry = tk.Entry(self.body, textvariable=self.remote_token_var, width=30)
+        token_entry.grid(row=row, column=1, sticky="we")
+        ToolTip(
+            token_entry,
+            "Must match the token printed by the agent on the remote PC "
+            "(generated into chamberkeep.json on first agent start).",
+        )
+        row += 1
+
+        tk.Button(
+            self.body, text="Test connection...", command=self.on_test_remote
+        ).grid(row=row, column=1, sticky="w", pady=(8, 0))
+        row += 1
 
     def _add_label(self, row, column, text):
         tk.Label(self.body, text=text, anchor="w").grid(
@@ -1006,6 +1628,18 @@ class SettingsDialog:
         for key in self.text_vars:
             self._set_lamp(key, getattr(self, "lamp_%s" % key))
             self.text_vars[key].set(self.config.effective_value(key))
+
+        self.remote_enabled_var.set(self.config.remote_enabled)
+        self.remote_mode_var.set(self.config.remote_mode)
+        self.remote_host_var.set(self.config.remote_host)
+        self.remote_user_var.set(self.config.remote_user)
+        self.remote_ssh_port_var.set(str(self.config.remote_ssh_port))
+        self.remote_agent_port_var.set(str(self.config.remote_agent_port))
+        self.remote_password_var.set(self.config.remote_password)
+        self.remote_token_var.set(self.config.agent_token)
+        self.start_agent_var.set(self.config.start_agent)
+        self.agent_port_var.set(str(self.config.agent_port))
+        self._refresh_agent_status()
 
     def _set_lamp(self, key, widget):
         """Refresh a lamp widget to match the current source for a key."""
@@ -1062,7 +1696,66 @@ class SettingsDialog:
                 "Invalid setting", "The password entries do not match."
             )
             return None
-        return port, poll
+        remote = self._validate_remote()
+        if remote is None:
+            return None
+        return port, poll, remote
+
+    def _validate_remote(self):
+        """Validate the remote/agent fields; returns a dict or None."""
+        try:
+            ssh_port = int(self.remote_ssh_port_var.get().strip())
+            if not 1 <= ssh_port <= 65535:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Invalid setting", "SSH port must be a number 1-65535."
+            )
+            return None
+        try:
+            agent_port = int(self.remote_agent_port_var.get().strip())
+            if not 1 <= agent_port <= 65535:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Invalid setting", "Agent port must be a number 1-65535."
+            )
+            return None
+        try:
+            local_agent_port = int(self.agent_port_var.get().strip())
+            if not 1 <= local_agent_port <= 65535:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "Invalid setting", "Local agent port must be a number 1-65535."
+            )
+            return None
+        enabled = self.remote_enabled_var.get()
+        mode = self.remote_mode_var.get()
+        host = self.remote_host_var.get().strip()
+        user = self.remote_user_var.get().strip()
+        if enabled and not host:
+            messagebox.showerror(
+                "Invalid setting",
+                "Remote host is required when remote control is enabled.",
+            )
+            return None
+        if enabled and mode == "ssh" and not user:
+            messagebox.showerror(
+                "Invalid setting", "SSH user is required for SSH tunnel mode."
+            )
+            return None
+        return {
+            "enabled": enabled,
+            "mode": mode,
+            "host": host,
+            "user": user,
+            "ssh_port": ssh_port,
+            "agent_port": agent_port,
+            "local_agent_port": local_agent_port,
+            "password": self.remote_password_var.get(),
+            "token": self.remote_token_var.get().strip(),
+        }
 
     # --- save / cancel ----------------------------------------------------
 
@@ -1071,9 +1764,10 @@ class SettingsDialog:
         apply_env_override(self.config, key, value, bool_value)
 
     def on_save(self):
-        port, poll = self._validate()
-        if port is None:
+        result = self._validate()
+        if not result:
             return
+        port, poll, remote = result
         if self.config.cli_port is None:
             self.config.port = port
         self.config.poll_seconds = poll
@@ -1086,6 +1780,17 @@ class SettingsDialog:
         for key, var in self.text_vars.items():
             self._apply_env_override(key, var.get().strip())
 
+        self.config.remote_enabled = remote["enabled"]
+        self.config.remote_mode = remote["mode"]
+        self.config.remote_host = remote["host"]
+        self.config.remote_user = remote["user"]
+        self.config.remote_ssh_port = remote["ssh_port"]
+        self.config.remote_agent_port = remote["agent_port"]
+        self.config.remote_password = remote["password"]
+        self.config.agent_token = remote["token"]
+        self.config.start_agent = self.start_agent_var.get()
+        self.config.agent_port = remote["local_agent_port"]
+
         want_autostart = self.start_with_windows_var.get()
         if want_autostart != autostart_enabled():
             ok = set_autostart(want_autostart)
@@ -1097,8 +1802,102 @@ class SettingsDialog:
 
         self.config.save()
         if self.app is not None:
+            self.app.reload_backend()
             self.app.refresh()
         self.on_cancel()
+
+    def on_test_remote(self):
+        """Try to reach the configured remote agent and report the result."""
+        host = self.remote_host_var.get().strip()
+        if not host:
+            messagebox.showwarning(
+                "Test connection", "Enter the remote host first."
+            )
+            return
+        tmp = Config({})
+        tmp.remote_enabled = True
+        tmp.remote_mode = self.remote_mode_var.get()
+        tmp.remote_host = host
+        tmp.remote_user = self.remote_user_var.get().strip()
+        try:
+            tmp.remote_ssh_port = int(self.remote_ssh_port_var.get().strip())
+            tmp.remote_agent_port = int(self.remote_agent_port_var.get().strip())
+        except ValueError:
+            messagebox.showerror(
+                "Test connection", "Ports must be numbers."
+            )
+            return
+        tmp.remote_password = self.remote_password_var.get()
+        tmp.agent_token = self.remote_token_var.get().strip()
+        try:
+            ok, message = test_remote(tmp)
+        except Exception as exc:
+            ok, message = False, str(exc)
+        if ok:
+            messagebox.showinfo("Test connection", "Connected:\n%s" % message)
+        else:
+            messagebox.showerror("Test connection", "Connection failed:\n%s" % message)
+
+    def on_toggle_agent(self):
+        """Start the local agent if stopped, stop it if running."""
+        port = self._agent_port()
+        if agent_running(port):
+            self._stop_agent(port)
+        else:
+            self._start_agent(port)
+
+    def _agent_port(self):
+        try:
+            return int(self.agent_port_var.get().strip())
+        except ValueError:
+            return self.config.agent_port
+
+    def _start_agent(self, port):
+        result = launch_agent(port)
+        self._poll_agent_status(port, expected=True)
+        messagebox.showinfo("Start agent", "Agent: %s" % result)
+
+    def _stop_agent(self, port):
+        token = self.config.ensure_agent_token()
+        ok, message = stop_agent(port, token)
+        self._poll_agent_status(port, expected=False)
+        messagebox.showinfo("Stop agent", "Agent: %s" % message)
+
+    def _refresh_agent_status(self):
+        """Update the status label and toggle button from a live ping."""
+        port = self._agent_port()
+        running = agent_running(port)
+        self._set_agent_status(running)
+
+    def _set_agent_status(self, running):
+        self.agent_status_var.set("Running" if running else "Stopped")
+        if self.agent_toggle_btn is not None:
+            self.agent_toggle_btn.config(
+                text="Stop agent" if running else "Start agent"
+            )
+
+    def _poll_agent_status(self, port, expected, seconds=4):
+        """Poll the agent status every second until it matches or times out.
+
+        Start/stop take a moment, so a single immediate ping is not enough;
+        poll briefly so the status reflects reality before the dialog is
+        dismissed.
+        """
+        remaining = int(seconds)
+        want_running = bool(expected)
+
+        def tick():
+            nonlocal remaining
+            running = agent_running(port)
+            self._set_agent_status(running)
+            if running == want_running:
+                return
+            remaining -= 1
+            if remaining <= 0:
+                return
+            self.dialog.after(1000, tick)
+
+        self.dialog.after(0, tick)
 
     def on_cancel(self):
         """Close the dialog by hiding the root again."""

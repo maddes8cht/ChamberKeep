@@ -28,12 +28,51 @@ interprets the JSON output.
     value) reverts to the environment value.
 - Optional: start the server automatically when ChamberKeep starts (if none is
   running), and start ChamberKeep itself with Windows.
+- **Remote control**: control an OpenChamber server on another PC in the local
+  network. A small agent (`chamberkeep-agent.py`) runs on the target PC in the
+  interactive session and executes all commands locally (correct context,
+  environment and UAC). The tray connects to it through an SSH tunnel (or
+  directly over the LAN) - see the "Remote" tab in the settings.
 
 ## Requirements
 
 - Windows (tray + registry autostart). 
 - Python 3.9+
 - Install dependencies: `pip install -r requirements.txt`
+
+## Remote control setup
+
+**Target PC (runs the OpenChamber server):**
+1. Start the agent: `python chamberkeep-agent.py` (or use the "Start agent"
+   toggle in the "Agent status" row / the "Start the local agent when
+   ChamberKeep starts" option under "ChamberKeep" in the Server tab of the
+   settings). The agent prints its
+   port and access token on first start. The agent can also be started and
+   stopped later from the tray menu ("Start Agent" / "Stop Agent") or the
+   "Agent status" row in the settings - stopping asks the running agent to
+   shut down cleanly and does not restart it.
+2. The agent binds to `127.0.0.1` by default. How it is reached depends on
+   the transport:
+   - **SSH tunnel (recommended)**: the tunnel connects to the agent via
+     `127.0.0.1` on the target, so the default local-only bind suffices.
+     Install Windows OpenSSH Server, configure key-based login, and open only
+     port 22 in the firewall. The SSH session is used purely as an encrypted
+     tunnel - commands still run inside the interactive agent, so the server
+     keeps the same context as a locally started one.
+   - **Direct LAN**: the client reaches the agent directly over the network,
+     so it must be reachable on a network interface: start the agent with
+     `python chamberkeep-agent.py --host 0.0.0.0` and open the agent port in
+     the firewall. Simpler, but exposes the agent (token-protected) directly
+     on the network.
+
+**Client PC (runs the tray):**
+1. In settings -> "Remote": enable remote control, choose the transport,
+   enter the target host, the user, the user's login password on the target
+   PC (or leave empty to use an SSH key), the ports and the agent token from
+   the target.
+2. Use "Test connection..." to verify, then Save. The tray now controls the
+   remote server with the same status/start/stop/restart/update behavior.
+
 
 ## Usage
 
