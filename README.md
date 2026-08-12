@@ -43,13 +43,14 @@ interprets the JSON output.
 ## Remote control setup
 
 **Target PC (runs the OpenChamber server):**
-1. Start the agent: `python chamberkeep-agent.py` (or use the "Start agent
-   now" button / "Start the local agent when ChamberKeep starts" option under
-   "ChamberKeep" in the Server tab of the settings). The agent prints its
+1. Start the agent: `python chamberkeep-agent.py` (or use the "Start agent"
+   toggle in the "Agent status" row / the "Start the local agent when
+   ChamberKeep starts" option under "ChamberKeep" in the Server tab of the
+   settings). The agent prints its
    port and access token on first start. The agent can also be started and
    stopped later from the tray menu ("Start Agent" / "Stop Agent") or the
-   "Agent status" section in the settings - "Stop Agent" asks the running
-   agent to shut down cleanly and does not restart it.
+   "Agent status" row in the settings - stopping asks the running agent to
+   shut down cleanly and does not restart it.
 2. The agent binds to `127.0.0.1` by default. How it is reached depends on
    the transport:
    - **SSH tunnel (recommended)**: the tunnel connects to the agent via

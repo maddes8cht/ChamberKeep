@@ -1314,6 +1314,7 @@ class SettingsDialog:
         self.start_agent_var = tk.BooleanVar()
         self.agent_port_var = tk.StringVar()
         self.agent_status_var = tk.StringVar()
+        self.agent_toggle_btn = None
 
         self._build()
         self._populate()
@@ -1375,12 +1376,12 @@ class SettingsDialog:
         host_frame = tk.Frame(self.body)
         host_frame.grid(row=row, column=1, sticky="w")
         for value, text in (
-            ("127.0.0.1", "Localhost only (127.0.0.1)"),
-            ("0.0.0.0", "Local network (0.0.0.0)"),
+            ("127.0.0.1", "Localhost (127.0.0.1)"),
+            ("0.0.0.0", "Local net (0.0.0.0)"),
         ):
             tk.Radiobutton(
                 host_frame, text=text, value=value, variable=self.host_var
-            ).pack(anchor="w")
+            ).pack(side="left", padx=(0, 12))
         self.host_lamp = self._lamp("OPENCHAMBER_HOST")
         self.host_lamp.grid(row=row, column=2, sticky="n")
         row += 1
@@ -1394,17 +1395,16 @@ class SettingsDialog:
         row += 1
 
         self._add_label(row, 0, "UI password")
-        pw_frame = tk.Frame(self.body)
-        pw_frame.grid(row=row, column=1, sticky="we")
         tk.Entry(
-            pw_frame, textvariable=self.password_vars["value"], show="*", width=30
-        ).pack(fill="x")
-        tk.Label(pw_frame, text="Confirm:").pack(anchor="w", pady=(6, 0))
-        tk.Entry(
-            pw_frame, textvariable=self.password_vars["confirm"], show="*", width=30
-        ).pack(fill="x")
+            self.body, textvariable=self.password_vars["value"], show="*", width=30
+        ).grid(row=row, column=1, sticky="we")
         self.pw_lamp = self._lamp("OPENCHAMBER_UI_PASSWORD")
         self.pw_lamp.grid(row=row, column=2, sticky="n")
+        row += 1
+        self._add_label(row, 0, "Confirm")
+        tk.Entry(
+            self.body, textvariable=self.password_vars["confirm"], show="*", width=30
+        ).grid(row=row, column=1, sticky="we")
         row += 1
 
         self._section(self.body, "OpenCode integration").grid(
@@ -1476,18 +1476,21 @@ class SettingsDialog:
             row=row, column=1, sticky="we"
         )
         row += 1
-        tk.Button(
-            self.body, text="Start agent now", command=self.on_start_agent
-        ).grid(row=row, column=1, sticky="w", pady=(8, 0))
-        row += 1
         self._add_label(row, 0, "Agent status")
-        tk.Label(self.body, textvariable=self.agent_status_var).grid(
-            row=row, column=1, sticky="w"
+        agent_frame = tk.Frame(self.body)
+        agent_frame.grid(row=row, column=1, sticky="w")
+        tk.Label(agent_frame, textvariable=self.agent_status_var, width=9).pack(
+            side="left"
         )
-        row += 1
-        tk.Button(
-            self.body, text="Stop agent now", command=self.on_stop_agent
-        ).grid(row=row, column=1, sticky="w", pady=(8, 0))
+        self.agent_toggle_btn = tk.Button(
+            agent_frame, text="Start agent", command=self.on_toggle_agent
+        )
+        self.agent_toggle_btn.pack(side="left", padx=(8, 0))
+        ToolTip(
+            self.agent_toggle_btn,
+            "Start the local chamberkeep-agent, or stop it if it is running. "
+            "Stopping sends /api/shutdown to the agent.",
+        )
 
     def _build_remote_tab(self):
         row = 0
@@ -1616,9 +1619,7 @@ class SettingsDialog:
         self.remote_token_var.set(self.config.agent_token)
         self.start_agent_var.set(self.config.start_agent)
         self.agent_port_var.set(str(self.config.agent_port))
-        self.agent_status_var.set(
-            "Running" if agent_running(self.config.agent_port) else "Stopped"
-        )
+        self._refresh_agent_status()
 
     def _set_lamp(self, key, widget):
         """Refresh a lamp widget to match the current source for a key."""
@@ -1816,30 +1817,66 @@ class SettingsDialog:
         else:
             messagebox.showerror("Test connection", "Connection failed:\n%s" % message)
 
-    def on_start_agent(self):
-        """Launch the local chamberkeep-agent process."""
+    def on_toggle_agent(self):
+        """Start the local agent if stopped, stop it if running."""
+        port = self._agent_port()
+        if agent_running(port):
+            self._stop_agent(port)
+        else:
+            self._start_agent(port)
+
+    def _agent_port(self):
         try:
-            port = int(self.agent_port_var.get().strip())
+            return int(self.agent_port_var.get().strip())
         except ValueError:
-            port = self.config.agent_port
+            return self.config.agent_port
+
+    def _start_agent(self, port):
         result = launch_agent(port)
-        self.agent_status_var.set(
-            "Running" if agent_running(port) else "Stopped"
-        )
+        self._poll_agent_status(port, expected=True)
         messagebox.showinfo("Start agent", "Agent: %s" % result)
 
-    def on_stop_agent(self):
-        """Ask the local chamberkeep-agent to shut itself down."""
-        try:
-            port = int(self.agent_port_var.get().strip())
-        except ValueError:
-            port = self.config.agent_port
+    def _stop_agent(self, port):
         token = self.config.ensure_agent_token()
         ok, message = stop_agent(port, token)
-        self.agent_status_var.set(
-            "Running" if agent_running(port) else "Stopped"
-        )
+        self._poll_agent_status(port, expected=False)
         messagebox.showinfo("Stop agent", "Agent: %s" % message)
+
+    def _refresh_agent_status(self):
+        """Update the status label and toggle button from a live ping."""
+        port = self._agent_port()
+        running = agent_running(port)
+        self._set_agent_status(running)
+
+    def _set_agent_status(self, running):
+        self.agent_status_var.set("Running" if running else "Stopped")
+        if self.agent_toggle_btn is not None:
+            self.agent_toggle_btn.config(
+                text="Stop agent" if running else "Start agent"
+            )
+
+    def _poll_agent_status(self, port, expected, seconds=4):
+        """Poll the agent status every second until it matches or times out.
+
+        Start/stop take a moment, so a single immediate ping is not enough;
+        poll briefly so the status reflects reality before the dialog is
+        dismissed.
+        """
+        remaining = int(seconds)
+        want_running = bool(expected)
+
+        def tick():
+            nonlocal remaining
+            running = agent_running(port)
+            self._set_agent_status(running)
+            if running == want_running:
+                return
+            remaining -= 1
+            if remaining <= 0:
+                return
+            self.dialog.after(1000, tick)
+
+        self.dialog.after(0, tick)
 
     def on_cancel(self):
         """Close the dialog by hiding the root again."""
