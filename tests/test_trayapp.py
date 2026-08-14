@@ -232,6 +232,33 @@ class TestScheduleStartAfterUpdate:
                 "Server restarted after update (port 3000)."
             )
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG: _schedule_start_after_update ignores the oc.start() "
+        "result and always shows the 'Server restarted after update' success "
+        "notification, even when the start request fails",
+    )
+    def test_start_failure_shows_error_notification(self, app, monkeypatch):
+        monkeypatch.setattr(ck.threading, "Thread", self.SyncThread)
+        app.oc.status_result = ({"state": "stopped", "instances": []}, None)
+        starts = []
+        app.oc.start = lambda: starts.append(1) or (False, "port 3000 in use")
+        app._schedule_start_after_update()
+        assert starts == [1]
+        assert app.icon.notifications == [
+            (
+                "Server restart after update failed (port 3000): port 3000 in use",
+                "ChamberKeep - Error",
+            )
+        ]
+
+    def test_start_exception_swallowed(self, app, monkeypatch):
+        monkeypatch.setattr(ck.threading, "Thread", self.SyncThread)
+        app.oc.status_result = ({"state": "stopped", "instances": []}, None)
+        app.oc.start = _boom
+        app._schedule_start_after_update()
+        assert app.icon.notifications == []
+
 
 class TestRefresh:
     def test_error_state_mapping(self, app):

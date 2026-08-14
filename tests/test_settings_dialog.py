@@ -174,3 +174,187 @@ class TestValidate:
         assert remote["mode"] == "lan"
         assert remote["user"] == ""
         assert error_box == []
+
+
+class FakeBoxes:
+    def __init__(self):
+        self.warning = []
+        self.error = []
+        self.info = []
+
+
+@pytest.fixture
+def boxes(monkeypatch):
+    calls = FakeBoxes()
+    monkeypatch.setattr(
+        ck.messagebox,
+        "showwarning",
+        lambda title, msg: calls.warning.append((title, msg)),
+    )
+    monkeypatch.setattr(
+        ck.messagebox,
+        "showerror",
+        lambda title, msg: calls.error.append((title, msg)),
+    )
+    monkeypatch.setattr(
+        ck.messagebox,
+        "showinfo",
+        lambda title, msg: calls.info.append((title, msg)),
+    )
+    return calls
+
+
+class TestOnTestRemote:
+    def test_empty_host_warns(self, boxes):
+        make_dialog().on_test_remote()
+        assert boxes.warning == [
+            ("Test connection", "Enter the remote host first.")
+        ]
+        assert boxes.error == []
+        assert boxes.info == []
+
+    def test_blank_host_warns(self, boxes):
+        make_dialog(remote_host="   ").on_test_remote()
+        assert boxes.warning == [
+            ("Test connection", "Enter the remote host first.")
+        ]
+
+    @pytest.mark.parametrize("which", ["ssh_port", "remote_agent_port"])
+    @pytest.mark.parametrize("bad", ["abc", ""])
+    def test_non_numeric_port_shows_error(self, boxes, which, bad):
+        make_dialog(remote_host="10.0.0.1", **{which: bad}).on_test_remote()
+        assert boxes.error == [("Test connection", "Ports must be numbers.")]
+        assert boxes.warning == []
+        assert boxes.info == []
+
+    def test_success_shows_info_with_message(self, boxes, monkeypatch):
+        monkeypatch.setattr(
+            ck, "test_remote", lambda cfg: (True, "Running (port 3000)")
+        )
+        make_dialog(remote_host="10.0.0.1").on_test_remote()
+        assert boxes.info == [
+            ("Test connection", "Connected:\nRunning (port 3000)")
+        ]
+        assert boxes.error == []
+
+    def test_failure_shows_error(self, boxes, monkeypatch):
+        monkeypatch.setattr(
+            ck, "test_remote", lambda cfg: (False, "connection timeout")
+        )
+        make_dialog(remote_host="10.0.0.1").on_test_remote()
+        assert boxes.error == [
+            ("Test connection", "Connection failed:\nconnection timeout")
+        ]
+        assert boxes.info == []
+
+    def test_exception_in_test_remote_shows_error(self, boxes, monkeypatch):
+        def boom(cfg):
+            raise RuntimeError("tunnel refused")
+
+        monkeypatch.setattr(ck, "test_remote", boom)
+        make_dialog(remote_host="10.0.0.1").on_test_remote()
+        assert boxes.error == [
+            ("Test connection", "Connection failed:\ntunnel refused")
+        ]
+
+    def test_tmp_config_carries_dialog_fields(self, boxes, monkeypatch):
+        captured = []
+        monkeypatch.setattr(
+            ck,
+            "test_remote",
+            lambda cfg: captured.append(cfg) or (True, "ok"),
+        )
+        dlg = make_dialog(
+            remote_host=" 10.0.0.9 ",
+            remote_mode="ssh",
+            remote_user=" bob ",
+            ssh_port="2222",
+            remote_agent_port="9001",
+            remote_password="pw",
+            remote_token=" tok ",
+        )
+        dlg.on_test_remote()
+        cfg = captured[0]
+        assert cfg.remote_enabled is True
+        assert cfg.remote_mode == "ssh"
+        assert cfg.remote_host == "10.0.0.9"
+        assert cfg.remote_user == "bob"
+        assert cfg.remote_ssh_port == 2222
+        assert cfg.remote_agent_port == 9001
+        assert cfg.remote_password == "pw"
+        assert cfg.agent_token == "tok"
+
+
+class TestOnToggleAgent:
+    @pytest.fixture
+    def toggle_calls(self, monkeypatch):
+        calls = {"launch": [], "stop": [], "poll": []}
+        monkeypatch.setattr(
+            ck,
+            "launch_agent",
+            lambda port: calls["launch"].append(port) or "started on port %s" % port,
+        )
+        monkeypatch.setattr(
+            ck,
+            "stop_agent",
+            lambda port, token: calls["stop"].append((port, token))
+            or (True, "Agent stopped"),
+        )
+        return calls
+
+    @pytest.fixture
+    def show_info(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            ck.messagebox,
+            "showinfo",
+            lambda title, msg: calls.append((title, msg)),
+        )
+        return calls
+
+    def _dialog(self):
+        dlg = make_dialog()
+        dlg.config = ck.Config({"agent_token": "tok"}, path="")
+        return dlg
+
+    def test_running_agent_is_stopped(
+        self, monkeypatch, toggle_calls, show_info
+    ):
+        monkeypatch.setattr(ck, "agent_running", lambda port: True)
+        dlg = self._dialog()
+        dlg._poll_agent_status = (
+            lambda port, expected, seconds=4: toggle_calls["poll"].append(
+                (port, expected)
+            )
+        )
+        dlg.on_toggle_agent()
+        assert toggle_calls["stop"] == [(8040, "tok")]
+        assert toggle_calls["launch"] == []
+        assert toggle_calls["poll"] == [(8040, False)]
+        assert show_info == [("Stop agent", "Agent: Agent stopped")]
+
+    def test_stopped_agent_is_started(
+        self, monkeypatch, toggle_calls, show_info
+    ):
+        monkeypatch.setattr(ck, "agent_running", lambda port: False)
+        dlg = self._dialog()
+        dlg._poll_agent_status = (
+            lambda port, expected, seconds=4: toggle_calls["poll"].append(
+                (port, expected)
+            )
+        )
+        dlg.on_toggle_agent()
+        assert toggle_calls["launch"] == [8040]
+        assert toggle_calls["stop"] == []
+        assert toggle_calls["poll"] == [(8040, True)]
+        assert show_info == [("Start agent", "Agent: started on port 8040")]
+
+    def test_non_numeric_port_falls_back_to_config(
+        self, monkeypatch, toggle_calls, show_info
+    ):
+        monkeypatch.setattr(ck, "agent_running", lambda port: True)
+        dlg = self._dialog()
+        dlg.agent_port_var = FakeVar("abc")
+        dlg._poll_agent_status = lambda port, expected, seconds=4: None
+        dlg.on_toggle_agent()
+        assert toggle_calls["stop"] == [(dlg.config.agent_port, "tok")]

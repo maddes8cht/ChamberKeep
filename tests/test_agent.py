@@ -204,6 +204,11 @@ class BoomHTTPServer:
         raise OSError("address already in use")
 
 
+class KIStubHTTPServer(StubHTTPServer):
+    def serve_forever(self):
+        raise KeyboardInterrupt
+
+
 @pytest.fixture
 def agent_main_env(agent, monkeypatch):
     monkeypatch.setattr(agent.logging, "basicConfig", lambda **kw: None)
@@ -255,3 +260,25 @@ class TestAgentMain:
         assert isinstance(server.oc, ck.LocalOpenChamber)
         assert server.token == "tok"
         assert server.closed is True
+
+    def test_keyboard_interrupt_returns_0_and_closes(self, agent_main_env, monkeypatch):
+        started = []
+        monkeypatch.setattr(sys, "argv", ["chamberkeep-agent.py"])
+
+        def factory(address, handler, oc, token):
+            server = KIStubHTTPServer(address, handler, oc, token)
+            started.append(server)
+            return server
+
+        monkeypatch.setattr(agent_main_env, "AgentHTTPServer", factory)
+        assert agent_main_env.main() == 0
+        assert started[0].closed is True
+
+    def test_version_flag_exits_zero(self, agent_main_env, monkeypatch, capsys):
+        monkeypatch.setattr(
+            sys, "argv", ["chamberkeep-agent.py", "--version"]
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            agent_main_env.main()
+        assert exc_info.value.code == 0
+        assert "chamberkeep-agent" in capsys.readouterr().out
