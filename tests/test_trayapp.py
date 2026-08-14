@@ -138,3 +138,150 @@ class TestRefreshDuringUpdate:
         assert app._update_restart_done is False
         assert app.state == "running"
         assert app.status_info == "port 3000"
+
+
+class TestDoStart:
+    @pytest.mark.parametrize(
+        "status_result, expected_ok, expected_msg, expected_starts",
+        [
+            (
+                (RUNNING_STATUS, None),
+                False,
+                "Server already running on port 3000",
+                0,
+            ),
+            (
+                ({"state": "stopped", "instances": []}, None),
+                True,
+                "Server start requested on port 3000",
+                1,
+            ),
+            (
+                (None, "openchamber not found on PATH"),
+                True,
+                "Server start requested on port 3000",
+                1,
+            ),
+        ],
+    )
+    def test_cases(
+        self, app, monkeypatch, status_result, expected_ok, expected_msg, expected_starts
+    ):
+        monkeypatch.setattr(ck.time, "sleep", lambda s: None)
+        app.oc.status_result = status_result
+        ok, message = app.do_start()
+        assert ok is expected_ok
+        assert message == expected_msg
+        assert app.oc.start_calls == expected_starts
+
+
+class TestDoUpdate:
+    @pytest.mark.parametrize(
+        "update_result, expected_ok, expected_msg, cmd_done, update_mode",
+        [
+            ((True, "updated 0.2.0 -> 0.3.0", True), True, "updated 0.2.0 -> 0.3.0", True, True),
+            ((True, "up to date (0.3.0)", False), True, "up to date (0.3.0)", False, False),
+            ((False, "boom", None), False, "boom", False, False),
+        ],
+    )
+    def test_cases(
+        self, app, update_result, expected_ok, expected_msg, cmd_done, update_mode
+    ):
+        app.oc.update = lambda: update_result
+        app._update_mode = True
+        app._update_command_done = False
+        ok, message = app.do_update()
+        assert ok is expected_ok
+        assert message == expected_msg
+        assert app._update_command_done is cmd_done
+        assert app._update_mode is update_mode
+
+
+def _boom():
+    raise RuntimeError("kaboom")
+
+
+class TestScheduleStartAfterUpdate:
+    class SyncThread:
+        def __init__(self, target, daemon=None):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    @pytest.mark.parametrize(
+        "status_result, status_raises, expected_starts, expected_notify",
+        [
+            ((RUNNING_STATUS, None), False, 0, 0),
+            (({"state": "stopped", "instances": []}, None), False, 1, 1),
+            ((None, None), True, 0, 0),
+        ],
+    )
+    def test_cases(
+        self, app, monkeypatch, status_result, status_raises, expected_starts, expected_notify
+    ):
+        monkeypatch.setattr(ck.threading, "Thread", self.SyncThread)
+        app.oc.status_result = status_result
+        if status_raises:
+            app.oc.status = _boom
+        app._schedule_start_after_update()
+        assert app.oc.start_calls == expected_starts
+        assert len(app.icon.notifications) == expected_notify
+        if expected_notify:
+            assert app.icon.notifications[0][0] == (
+                "Server restarted after update (port 3000)."
+            )
+
+
+class TestRefresh:
+    def test_error_state_mapping(self, app):
+        app.oc.status_result = (None, "connection refused")
+        app.refresh()
+        assert app.state == "error"
+        assert app.status_info == "connection refused"
+
+    def test_first_refresh_notify_suppressed(self, app):
+        app.oc.status_result = (RUNNING_STATUS, None)
+        app.refresh()
+        assert app.icon.notifications == []
+        app.oc.status_result = ({"state": "stopped", "instances": []}, None)
+        app.refresh()
+        assert app.icon.notifications == [
+            ("no server running on port 3000", "Stopped")
+        ]
+
+    def test_local_mode_polls_agent(self, app, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            ck, "agent_running", lambda port: calls.append(port) or True
+        )
+        app.refresh()
+        assert calls == [8040]
+        assert app.agent_running is True
+
+    def test_remote_mode_skips_agent_poll(self, app, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            ck, "agent_running", lambda port: calls.append(port) or True
+        )
+        app.config.remote_enabled = True
+        app.config.remote_host = "10.0.0.1"
+        app.refresh()
+        assert calls == []
+        assert app.agent_running is False
+
+
+class TestTask:
+    @pytest.mark.parametrize(
+        "fn, expected_notify",
+        [
+            (lambda: (True, "Server started"), ("Server started", "ChamberKeep - Success")),
+            (_boom, ("kaboom", "ChamberKeep - Error")),
+        ],
+    )
+    def test_success_and_error(self, app, monkeypatch, fn, expected_notify):
+        refreshes = []
+        monkeypatch.setattr(app, "refresh", lambda: refreshes.append(1))
+        app._task(fn)
+        assert refreshes == [1]
+        assert app.icon.notifications == [expected_notify]

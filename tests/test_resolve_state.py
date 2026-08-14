@@ -75,3 +75,14 @@ class TestResolveState:
     def test_non_dict_instance_entry(self):
         data = {"state": "running", "instances": ["oops", {"port": 3000}]}
         assert ck.resolve_state(data, 3000)[0] == "running"
+
+    def test_port_zero_instances_excluded_from_running_list(self):
+        data = {"state": "running", "instances": [{"port": 0}]}
+        assert ck.resolve_state(data, 3000) == (
+            "ambiguous",
+            "no instance on port 3000 (running: none)",
+        )
+        data = {"state": "running", "instances": [{"port": 0}, {"port": 3001}]}
+        state, info = ck.resolve_state(data, 3000)
+        assert state == "ambiguous"
+        assert "running: 3001" in info

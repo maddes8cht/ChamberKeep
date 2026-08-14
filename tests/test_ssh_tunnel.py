@@ -156,3 +156,65 @@ class TestConnect:
         assert kw["port"] == 2222
         assert kw["username"] == "alice"
         assert kw["password"] == "pw"
+
+
+class FakeTunnel:
+    def __init__(self, channel):
+        self._channel = channel
+
+    def open_channel(self):
+        return self._channel
+
+
+class TestOpenChannel:
+    def test_direct_tcpip_target_and_default_timeout(self, ssh_config):
+        tunnel = ck.SSHTunnel(ssh_config)
+        transport = FakeTransport()
+        client = FakeClient()
+        client.transport = transport
+        tunnel._client = client
+        channel = tunnel.open_channel()
+        assert transport.opened == [
+            ("direct-tcpip", ("127.0.0.1", 8040), ("127.0.0.1", 0))
+        ]
+        assert channel.timeout == 30
+
+
+class TestClose:
+    def test_idempotent(self, ssh_config):
+        tunnel = ck.SSHTunnel(ssh_config)
+        client = FakeClient()
+        tunnel._client = client
+        tunnel.close()
+        tunnel.close()
+        assert client.close_calls == 1
+        assert tunnel._client is None
+
+
+class TestChannelSocket:
+    def test_forwards_to_channel(self):
+        channel = FakeChannel()
+        sock = ck._ChannelSocket(channel)
+        sock.sendall(b"abc")
+        sock.settimeout(12)
+        assert channel.sent == b"abc"
+        assert channel.timeout == 12
+        assert sock.recv(10) == b""
+        assert sock.makefile("rb") == []
+        assert sock.connect(("host", 1)) is None
+        assert sock.shutdown(0) is None
+        sock.close()
+        assert channel.closed is True
+
+
+class TestTunnelHTTPConnection:
+    @pytest.mark.parametrize(
+        "timeout, expected", [(240, 240), (30, 30), (None, None)]
+    )
+    def test_connect_channel_timeout(self, timeout, expected):
+        channel = FakeChannel()
+        tunnel = FakeTunnel(channel)
+        conn = ck._TunnelHTTPConnection(tunnel, "127.0.0.1", 8040, timeout=timeout)
+        conn.connect()
+        assert isinstance(conn.sock, ck._ChannelSocket)
+        assert channel.timeout == expected

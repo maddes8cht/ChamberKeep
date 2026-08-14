@@ -234,3 +234,14 @@ class FakeRemote:
 
     def resolve_port(self, fallback):
         return fallback
+
+
+class TestTimeout:
+    def test_per_method_values(self):
+        remote = ck.RemoteOpenChamber(ck.Config({}))
+        assert remote._timeout("update") == 240
+        assert remote._timeout("restart") == 120
+        assert remote._timeout("status") == 30
+        assert remote._timeout("start") == 30
+        assert remote._timeout("stop") == 30
+        assert remote._timeout("bogus") == 30

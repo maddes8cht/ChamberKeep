@@ -141,6 +141,17 @@ class TestSaveLoad:
         cfg = ck.Config.load(str(path))
         assert cfg.port == 3000
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG: Config.load crashes with TypeError when env_overrides "
+        "is valid JSON but not a dict",
+    )
+    def test_load_non_dict_env_overrides_falls_back(self, tmp_path):
+        path = tmp_path / "chamberkeep.json"
+        path.write_text(json.dumps({"env_overrides": [1, 2]}), encoding="utf-8")
+        cfg = ck.Config.load(str(path))
+        assert cfg.env_overrides == {}
+
 
 class TestEnsureAgentToken:
     def test_generates_persists_and_is_stable(self, tmp_path):

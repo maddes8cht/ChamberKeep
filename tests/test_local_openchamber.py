@@ -150,3 +150,20 @@ class TestUpdate:
             ck.subprocess, "run", lambda *a, **kw: FakeProc(returncode=1),
         )
         assert loc.update() == (False, "unknown", None)
+
+
+class TestRestartEnv:
+    def test_passes_build_serve_env(self, loc, monkeypatch):
+        marker = {"CK_MARKER": "1"}
+        monkeypatch.setattr(loc.config, "build_serve_env", lambda: marker)
+        captured = {}
+
+        def rec(args, **kw):
+            captured.update(kw)
+            return FakeProc()
+
+        monkeypatch.setattr(ck.subprocess, "run", rec)
+        ok, message = loc.restart()
+        assert ok is True
+        assert captured["env"] is marker
+        assert captured["timeout"] == 120
