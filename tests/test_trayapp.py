@@ -285,3 +285,93 @@ class TestTask:
         app._task(fn)
         assert refreshes == [1]
         assert app.icon.notifications == [expected_notify]
+
+
+class FakeMenuItem:
+    def __init__(self, text, action=None, enabled=True):
+        self.text = text
+        self.action = action
+        self.enabled = enabled
+
+
+class FakeMenu:
+    SEPARATOR = object()
+
+    def __init__(self, *items):
+        self.items = items
+
+
+class FakePystray:
+    def __init__(self):
+        self.MenuItem = FakeMenuItem
+        self.Menu = FakeMenu
+
+
+@pytest.fixture
+def menu_app(monkeypatch):
+    monkeypatch.setattr(ck, "pystray", FakePystray())
+    monkeypatch.setattr(ck, "agent_running", lambda port: False)
+    app = ck.TrayApp(ck.Config({}))
+    app.oc = None
+    return app
+
+
+def menu_items(menu):
+    return [item for item in menu.items if isinstance(item, FakeMenuItem)]
+
+
+def menu_texts(menu):
+    return [item.text for item in menu_items(menu)]
+
+
+def find_item(menu, text):
+    return next(item for item in menu_items(menu) if item.text == text)
+
+
+class TestBuildMenu:
+    def test_normal_status_text(self, menu_app):
+        menu_app.state = "running"
+        menu_app.status_info = "port 3000, pid 123"
+        menu = menu_app.build_menu()
+        texts = menu_texts(menu)
+        assert "Status: Running - port 3000, pid 123" in texts
+        assert "Target: local" in texts
+
+    def test_updating_status_text(self, menu_app):
+        menu_app._update_mode = True
+        menu = menu_app.build_menu()
+        assert "Status: Updating..." in menu_texts(menu)
+
+    def test_action_items_disabled_during_update(self, menu_app):
+        menu_app._update_mode = True
+        menu = menu_app.build_menu()
+        for text in ("Start Server", "Stop Server", "Restart Server", "Update"):
+            assert find_item(menu, text).enabled is False
+
+    def test_action_items_enabled_normally(self, menu_app):
+        menu = menu_app.build_menu()
+        for text in ("Start Server", "Stop Server", "Restart Server", "Update"):
+            assert find_item(menu, text).enabled is True
+        assert find_item(menu, "Start Server").action.__self__ is menu_app
+        assert find_item(menu, "Start Server").action.__func__ is ck.TrayApp.on_start
+        assert find_item(menu, "Update").action.__self__ is menu_app
+
+    def test_agent_section_local_states(self, menu_app):
+        menu = menu_app.build_menu()
+        assert "Agent: Stopped" in menu_texts(menu)
+        assert find_item(menu, "Start Agent").enabled is True
+        assert find_item(menu, "Stop Agent").enabled is False
+
+        menu_app.agent_running = True
+        menu = menu_app.build_menu()
+        assert "Agent: Running" in menu_texts(menu)
+        assert find_item(menu, "Start Agent").enabled is False
+        assert find_item(menu, "Stop Agent").enabled is True
+
+    def test_agent_section_hidden_in_remote_mode(self, menu_app):
+        menu_app.config.remote_enabled = True
+        menu_app.config.remote_host = "10.0.0.1"
+        texts = menu_texts(menu_app.build_menu())
+        assert "Target: remote 10.0.0.1" in texts
+        assert not any(t.startswith("Agent:") or t.endswith("Agent") for t in texts)
+        assert find_item(menu_app.build_menu(), "Settings...") is not None
