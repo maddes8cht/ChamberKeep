@@ -123,6 +123,7 @@ class TestStatus:
         assert data == {"state": "running"}
         assert err is None
         assert remote.resolve_port(3000) == 4321
+        assert remote.api_only is False
 
         conn.response = FakeResponse(500, b'{"ok": false, "error": "nope"}')
         data, err = remote.status()
@@ -133,6 +134,20 @@ class TestStatus:
         remote._port = None
         remote.status()
         assert remote.resolve_port(3000) == 3000
+
+    def test_surfaces_api_only_flag(self, monkeypatch, lan_config):
+        remote = ck.RemoteOpenChamber(lan_config)
+        conn = FakeHTTPConnection(None, None)
+        conn.response = FakeResponse(
+            200,
+            b'{"ok": true, "port": 3000, "api_only": true, '
+            b'"data": {"state": "running"}}',
+        )
+        fake_http(monkeypatch, conn)
+        data, err = remote.status()
+        assert data == {"state": "running"}
+        assert err is None
+        assert remote.api_only is True
 
 
 class TestActions:
