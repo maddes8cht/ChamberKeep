@@ -131,7 +131,8 @@ any file on disk.
 ## Development
 
 - All code comments and docstrings are English.
-- Tests: `python <temp>/test_ck_logic.py` (pure logic, no server required).
+- Tests: `python -m pytest` (run with the project's conda env, e.g.
+  `c:\Users\Mathias\miniforge3\envs\py313\python.exe -m pytest`).
 - Icons: the `logo-*.png` tray icons are generated from `logo-light.svg` via
   `python generate_icons.py` (dev-time only, needs `resvg-py`). Re-run it
   whenever the SVG changes and commit the updated PNGs.
