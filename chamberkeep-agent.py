@@ -23,10 +23,18 @@ settings of the controlling ChamberKeep.
 
 Endpoints (JSON):
     GET  /api/ping                       -> {"ok": true}
-    GET  /api/status                     -> {"ok": true, "data": <status json>, "port": N}
+    GET  /api/status                     -> {"ok": true, "data": <status json>, "port": N,
+                                             "api_only": bool}
     POST /api/start|stop|restart|update  -> {"ok": true, "message": "..."}
     POST /api/shutdown                   -> {"ok": true, "message": "..."} (stops the agent itself)
 All endpoints except /api/ping require the header "X-ChamberKeep-Token".
+
+The "api_only" field reports the target's effective OPENCHAMBER_API_ONLY value
+(its chamberkeep.json override or environment). This is what ChamberKeep
+passes to `openchamber serve`, so it reflects API-only mode whenever the
+server was started by ChamberKeep (locally by the tray, or remotely through
+the agent). If the daemon was started externally, the value reflects the
+target config, not the external daemon's actual mode.
 """
 
 import argparse
@@ -105,6 +113,9 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "data": data,
                     "port": self.server.oc.config.port,
+                    "api_only": bool(
+                        self.server.oc.config.effective_value("OPENCHAMBER_API_ONLY")
+                    ),
                 },
             )
             return

@@ -437,3 +437,120 @@ class TestBuildMenu:
         assert "Target: remote 10.0.0.1" in texts
         assert not any(t.startswith("Agent:") or t.endswith("Agent") for t in texts)
         assert find_item(menu_app.build_menu(), "Settings...") is not None
+
+
+class TestWebUiStatus:
+    def test_local_running_no_api_only(self, app):
+        app.state = "running"
+        url, available = app._webui_status()
+        assert available is True
+        assert url == "http://localhost:3000"
+
+    def test_local_stopped(self, app):
+        app.state = "stopped"
+        url, available = app._webui_status()
+        assert available is False
+        assert url == ""
+
+    def test_local_api_only_disables(self, app):
+        app.config.set_override("OPENCHAMBER_API_ONLY", True)
+        app.state = "running"
+        url, available = app._webui_status()
+        assert available is False
+        assert url == ""
+
+    def test_local_uses_resolved_port(self, app):
+        app.oc.resolve_port = lambda fallback: 4321
+        app.state = "running"
+        url, available = app._webui_status()
+        assert url == "http://localhost:4321"
+
+    def test_remote_running_no_api_only(self, app):
+        app.config.remote_enabled = True
+        app.config.remote_host = "10.0.0.9"
+        app.state = "running"
+        url, available = app._webui_status()
+        assert available is True
+        assert url == "http://10.0.0.9:3000"
+
+    def test_remote_running_api_only_disables(self, app):
+        app.config.remote_enabled = True
+        app.config.remote_host = "10.0.0.9"
+        app.oc.api_only = True
+        app.state = "running"
+        url, available = app._webui_status()
+        assert available is False
+        assert url == ""
+
+    def test_refresh_sets_webui_availability(self, app):
+        app.oc.status_result = (RUNNING_STATUS, None)
+        app.refresh()
+        assert app._webui_available is True
+        assert app._webui_url == "http://localhost:3000"
+
+    def test_refresh_api_only_disables_webui(self, app):
+        app.config.set_override("OPENCHAMBER_API_ONLY", True)
+        app.oc.status_result = (RUNNING_STATUS, None)
+        app.refresh()
+        assert app._webui_available is False
+
+
+class TestBuildMenuWebUi:
+    def test_includes_webui_when_available(self, menu_app):
+        menu_app._webui_available = True
+        menu_app._webui_url = "http://localhost:3000"
+        menu = menu_app.build_menu()
+        item = find_item(menu, "Open WebUI (http://localhost:3000)")
+        assert item is not None
+        assert item.enabled is True
+        assert item.action.__self__ is menu_app
+        assert item.action.__func__ is ck.TrayApp.on_open_webui
+
+    def test_omits_webui_when_unavailable(self, menu_app):
+        menu = menu_app.build_menu()
+        assert not any(t.startswith("Open WebUI") for t in menu_texts(menu))
+
+    def test_omits_webui_during_update(self, menu_app):
+        menu_app._update_mode = True
+        menu_app._webui_available = True
+        menu = menu_app.build_menu()
+        assert not any(t.startswith("Open WebUI") for t in menu_texts(menu))
+
+
+class TestOpenWebUi:
+    def test_opens_browser_with_url(self, app, monkeypatch):
+        opened = []
+        monkeypatch.setattr(
+            ck.webbrowser, "open", lambda url: opened.append(url) or True
+        )
+        app._webui_url = "http://localhost:3000"
+        app.on_open_webui(None, None)
+        assert opened == ["http://localhost:3000"]
+
+    def test_no_url_does_nothing(self, app, monkeypatch):
+        opened = []
+        monkeypatch.setattr(
+            ck.webbrowser, "open", lambda url: opened.append(url) or True
+        )
+        app._webui_url = ""
+        app.on_open_webui(None, None)
+        assert opened == []
+
+    def test_open_failure_notifies(self, app, monkeypatch):
+        monkeypatch.setattr(ck.webbrowser, "open", lambda url: False)
+        app._webui_url = "http://localhost:3000"
+        app.on_open_webui(None, None)
+        assert app.icon.notifications == [
+            ("No web browser available to open http://localhost:3000", "ChamberKeep")
+        ]
+
+    def test_open_exception_notifies(self, app, monkeypatch):
+        def boom(url):
+            raise OSError("no display")
+
+        monkeypatch.setattr(ck.webbrowser, "open", boom)
+        app._webui_url = "http://localhost:3000"
+        app.on_open_webui(None, None)
+        assert app.icon.notifications == [
+            ("Could not open http://localhost:3000", "ChamberKeep - Error")
+        ]

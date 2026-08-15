@@ -25,6 +25,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.ttk as ttk
+import webbrowser
 from tkinter import messagebox
 
 try:
@@ -548,10 +549,16 @@ class RemoteOpenChamber(OpenChamberBase):
         self.config = config
         self._tunnel = SSHTunnel(config) if config.remote_mode == "ssh" else None
         self._port = None
+        self._api_only = False
 
     def resolve_port(self, fallback):
         """Use the port reported by the agent once known, else the fallback."""
         return self._port if self._port else fallback
+
+    @property
+    def api_only(self):
+        """True when the target reports API-only mode (no browser UI)."""
+        return self._api_only
 
     def _timeout(self, method):
         """Longer timeouts for slow operations (update, restart)."""
@@ -610,6 +617,7 @@ class RemoteOpenChamber(OpenChamberBase):
         if not payload.get("ok"):
             return None, self._action_error(payload, "agent reported an error")
         self._port = payload.get("port") or self._port
+        self._api_only = bool(payload.get("api_only", False))
         return payload.get("data"), None
 
     def start(self):
@@ -834,6 +842,8 @@ class TrayApp:
         self._update_blink = False
         self._update_was_running = False
         self._update_normal_state = "stopped"
+        self._webui_url = ""
+        self._webui_available = False
         self.agent_running = agent_running(self.config.agent_port)
 
     def reload_backend(self):
@@ -892,6 +902,14 @@ class TrayApp:
             pystray.MenuItem("Restart Server", self.on_restart, enabled=not updating),
             pystray.MenuItem("Update", self.on_update, enabled=not updating),
         ]
+        # The Web UI can only be reached while the server is running and not
+        # in API-only mode; it makes no sense to offer it during an update.
+        if self._webui_available and not updating:
+            items.append(
+                pystray.MenuItem(
+                    "Open WebUI (%s)" % self._webui_url, self.on_open_webui
+                )
+            )
         # The local agent only exists on this PC; when controlling a remote
         # server the agent lives on the target, so hide this section entirely.
         if not (self.config.remote_enabled and self.config.remote_host):
@@ -1003,6 +1021,7 @@ class TrayApp:
         changed = state != self.state or info != self.status_info
         self.state = state
         self.status_info = info
+        self._webui_url, self._webui_available = self._webui_status()
         self.icon.icon = self.create_icon(state)
         self.icon.title = "%s - OpenChamber (port %s)" % (
             STATE_LABELS.get(state, "Unknown"),
@@ -1021,6 +1040,27 @@ class TrayApp:
         self.icon.title = "ChamberKeep - Updating... (port %s)" % self.config.port
         self.icon.menu = self.build_menu()
         self.icon.update_menu()
+
+    def _webui_status(self):
+        """Return (url, available) for the OpenChamber Web UI.
+
+        The Web UI is reachable only while the server is running and API-only
+        mode is off. Locally the flag comes from the tray's own effective
+        config; remotely from the agent's status payload (see RemoteOpenChamber
+        and the agent's /api/status). Returns ("", False) otherwise.
+        """
+        if self.state != "running":
+            return "", False
+        if self.config.remote_enabled and self.config.remote_host:
+            if getattr(self.oc, "api_only", False):
+                return "", False
+            host = self.config.remote_host
+        else:
+            if self.config.effective_value("OPENCHAMBER_API_ONLY"):
+                return "", False
+            host = "localhost"
+        port = self.oc.resolve_port(self.config.port)
+        return "http://%s:%s" % (host, port), True
 
     def _updating_icon(self):
         """Alternate between the inverted logo and the pre-update state icon."""
@@ -1150,6 +1190,18 @@ class TrayApp:
         self._enter_update_mode()
         self._apply_updating_display()
         self._spawn(self.do_update)
+
+    def on_open_webui(self, icon, item):
+        url = self._webui_url
+        if not url:
+            return
+        try:
+            if not webbrowser.open(url):
+                self.notify(
+                    "No web browser available to open %s" % url, "ChamberKeep"
+                )
+        except Exception:
+            self.notify("Could not open %s" % url, "ChamberKeep - Error")
 
     def on_settings(self, icon, item):
         self._tk_queue.put(self._show_settings)

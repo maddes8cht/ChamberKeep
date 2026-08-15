@@ -12,6 +12,11 @@ interprets the JSON output.
   The icon is the ChamberKeep logo in the state color (pre-rendered from
   `logo-light.svg`).
 - Start / Stop / Restart / Update from the tray menu.
+- **Open WebUI**: while the server is running and API-only mode is *not*
+  active, the tray menu offers an "Open WebUI (http://...)" item that opens
+  the browser UI (locally at `localhost:<port>`, remotely at
+  `<remote-host>:<port>`). The item is hidden when the server is stopped, is
+  updating, or runs in API-only mode (no browser UI).
 - During `update` the tray shows a blinking inverted logo with an
   "Updating..." tooltip; transient status errors are suppressed. When the
   update finishes, the display returns to the real state, and if the server
@@ -64,6 +69,13 @@ interprets the JSON output.
      `python chamberkeep-agent.py --host 0.0.0.0` and open the agent port in
      the firewall. Simpler, but exposes the agent (token-protected) directly
      on the network.
+3. The agent reports the target's effective `OPENCHAMBER_API_ONLY` value in
+   its status response. This is the value ChamberKeep passes to
+   `openchamber serve`, so it reflects API-only mode whenever the server was
+   started by ChamberKeep (locally by the tray, or remotely through the
+   agent). If the daemon was started externally, the reported value reflects
+   the target config, not the external daemon's actual mode - in that rare
+   case the "Open WebUI" gate may be wrong.
 
 **Client PC (runs the tray):**
 1. In settings -> "Remote": enable remote control, choose the transport,
@@ -71,7 +83,9 @@ interprets the JSON output.
    PC (or leave empty to use an SSH key), the ports and the agent token from
    the target.
 2. Use "Test connection..." to verify, then Save. The tray now controls the
-   remote server with the same status/start/stop/restart/update behavior.
+   remote server with the same status/start/stop/restart/update behavior and
+   offers "Open WebUI (http://<host>:<port>)" whenever the remote server is
+   running and not in API-only mode.
 
 
 ## Usage

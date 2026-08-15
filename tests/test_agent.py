@@ -123,8 +123,17 @@ class TestAgentEndpoints:
             "ok": True,
             "data": {"state": "running", "instances": []},
             "port": 3000,
+            "api_only": False,
         }
         assert oc.calls == ["status"]
+
+    def test_status_reports_effective_api_only(self, httpd):
+        server, oc, port, thread = httpd
+        oc.config.set_override("OPENCHAMBER_API_ONLY", True)
+        oc.status_result = ({"state": "running", "instances": []}, None)
+        status, payload = http_request(port, "GET", "/api/status", token="tok123")
+        assert status == 200
+        assert payload["api_only"] is True
 
     def test_status_error_returns_500(self, httpd):
         server, oc, port, thread = httpd
