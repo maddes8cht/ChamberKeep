@@ -3,38 +3,9 @@ import json
 import pytest
 
 import ChamberKeep as ck
+from fakes import FakeHTTPConnection, FakeResponse, fake_http
 
 RUNNING = {"status": "ok", "state": "running", "instances": [{"port": 3000}]}
-
-
-class FakeResponse:
-    def __init__(self, status=200, body=b"{}"):
-        self.status = status
-        self._body = body
-
-    def read(self):
-        return self._body
-
-
-class FakeHTTPConnection:
-    def __init__(self, host, port, timeout=30):
-        self.host = host
-        self.port = port
-        self.timeout = timeout
-        self.request_calls = []
-        self.response = FakeResponse()
-        self.raise_on_request = None
-
-    def request(self, verb, path, body=None, headers=None):
-        if self.raise_on_request is not None:
-            raise self.raise_on_request
-        self.request_calls.append((verb, path, body, headers))
-
-    def getresponse(self):
-        return self.response
-
-    def close(self):
-        pass
 
 
 @pytest.fixture
@@ -59,15 +30,11 @@ def ssh_config():
     })
 
 
-def fake_conn(monkeypatch, conn):
-    monkeypatch.setattr(ck.http.client, "HTTPConnection", lambda *a, **kw: conn)
-
-
 class TestRequestLan:
     def test_ok_uses_get_and_token_header(self, monkeypatch, lan_config):
         conn = FakeHTTPConnection(None, None)
         conn.response = FakeResponse(200, b'{"ok": true}')
-        fake_conn(monkeypatch, conn)
+        fake_http(monkeypatch, conn)
         remote = ck.RemoteOpenChamber(lan_config)
         payload, err = remote._request("status")
         assert payload == {"ok": True}
@@ -80,7 +47,7 @@ class TestRequestLan:
     def test_post_verb_and_body(self, monkeypatch, lan_config):
         conn = FakeHTTPConnection(None, None)
         conn.response = FakeResponse(200, b'{"ok": true}')
-        fake_conn(monkeypatch, conn)
+        fake_http(monkeypatch, conn)
         remote = ck.RemoteOpenChamber(lan_config)
         remote._request("start", data={"force": True})
         verb, path, body, headers = conn.request_calls[0]
@@ -90,7 +57,7 @@ class TestRequestLan:
     def test_401_rejected_token(self, monkeypatch, lan_config):
         conn = FakeHTTPConnection(None, None)
         conn.response = FakeResponse(401, b'{"ok": false, "error": "unauthorized"}')
-        fake_conn(monkeypatch, conn)
+        fake_http(monkeypatch, conn)
         remote = ck.RemoteOpenChamber(lan_config)
         payload, err = remote._request("status")
         assert payload is None
@@ -99,7 +66,7 @@ class TestRequestLan:
     def test_unparseable_body(self, monkeypatch, lan_config):
         conn = FakeHTTPConnection(None, None)
         conn.response = FakeResponse(200, b"<html>gateway</html>")
-        fake_conn(monkeypatch, conn)
+        fake_http(monkeypatch, conn)
         remote = ck.RemoteOpenChamber(lan_config)
         payload, err = remote._request("status")
         assert payload is None
@@ -108,7 +75,7 @@ class TestRequestLan:
     def test_oserror_unreachable(self, monkeypatch, lan_config):
         conn = FakeHTTPConnection(None, None)
         conn.raise_on_request = OSError("connection refused")
-        fake_conn(monkeypatch, conn)
+        fake_http(monkeypatch, conn)
         remote = ck.RemoteOpenChamber(lan_config)
         payload, err = remote._request("status")
         assert payload is None
@@ -151,7 +118,7 @@ class TestStatus:
         conn.response = FakeResponse(
             200, b'{"ok": true, "port": 4321, "data": {"state": "running"}}'
         )
-        fake_conn(monkeypatch, conn)
+        fake_http(monkeypatch, conn)
         data, err = remote.status()
         assert data == {"state": "running"}
         assert err is None
@@ -185,13 +152,13 @@ class TestActions:
         for status, body, method, expected in cases:
             conn = FakeHTTPConnection(None, None)
             conn.response = FakeResponse(status, body)
-            fake_conn(monkeypatch, conn)
+            fake_http(monkeypatch, conn)
             result = getattr(remote, method)()
             assert result == expected, (method, result)
 
         conn = FakeHTTPConnection(None, None)
         conn.raise_on_request = OSError("reset")
-        fake_conn(monkeypatch, conn)
+        fake_http(monkeypatch, conn)
         ok, message, updated = remote.update()
         assert ok is False
         assert updated is None

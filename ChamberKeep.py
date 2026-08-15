@@ -110,13 +110,15 @@ class Config:
     """
 
     def __init__(self, data=None, path=CONFIG_PATH):
-        data = data or {}
+        if not isinstance(data, dict):
+            data = {}
         self.path = path
         self.port = int(data.get("port", 3000))
         self.auto_start_server = bool(data.get("auto_start_server", False))
         self.start_with_windows = bool(data.get("start_with_windows", False))
         self.poll_seconds = int(data.get("poll_seconds", 5))
-        self.env_overrides = dict(data.get("env_overrides") or {})
+        env_overrides = data.get("env_overrides")
+        self.env_overrides = dict(env_overrides) if isinstance(env_overrides, dict) else {}
         # local agent (target side)
         self.start_agent = bool(data.get("start_agent", False))
         self.agent_port = int(data.get("agent_port", 8040))
@@ -652,7 +654,7 @@ def resolve_state(data, port):
         return "error", "no status data"
     if data.get("state") != "running":
         return "stopped", "no server running on port %s" % port
-    instances = data.get("instances") or []
+    instances = [i for i in (data.get("instances") or []) if isinstance(i, dict)]
     on_port = [i for i in instances if i.get("port") == port]
     if len(on_port) == 1:
         inst = on_port[0]
@@ -1051,11 +1053,18 @@ class TrayApp:
                     )
                     if state == "running":
                         return
-                self.oc.start()
-                self.notify(
-                    "Server restarted after update (port %s)." % self.config.port,
-                    "ChamberKeep",
-                )
+                ok, message = self.oc.start()
+                if ok:
+                    self.notify(
+                        "Server restarted after update (port %s)." % self.config.port,
+                        "ChamberKeep",
+                    )
+                else:
+                    self.notify(
+                        "Server restart after update failed (port %s): %s"
+                        % (self.config.port, message),
+                        "ChamberKeep - Error",
+                    )
             except Exception:
                 pass
 

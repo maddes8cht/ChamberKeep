@@ -1,8 +1,6 @@
 import json
 import os
 
-import pytest
-
 import ChamberKeep as ck
 
 
@@ -130,22 +128,12 @@ class TestSaveLoad:
         assert cfg.port == 3000
         assert cfg.poll_seconds == 5
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: Config.load crashes with AttributeError when the JSON "
-        "is valid but not a dict",
-    )
     def test_load_top_level_list_falls_back(self, tmp_path):
         path = tmp_path / "chamberkeep.json"
         path.write_text("[1, 2]", encoding="utf-8")
         cfg = ck.Config.load(str(path))
         assert cfg.port == 3000
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: Config.load crashes with TypeError when env_overrides "
-        "is valid JSON but not a dict",
-    )
     def test_load_non_dict_env_overrides_falls_back(self, tmp_path):
         path = tmp_path / "chamberkeep.json"
         path.write_text(json.dumps({"env_overrides": [1, 2]}), encoding="utf-8")

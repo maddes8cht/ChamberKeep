@@ -3,46 +3,7 @@ import sys
 import pytest
 
 import ChamberKeep as ck
-
-
-class FakeResponse:
-    def __init__(self, status=200, body=b"{}"):
-        self.status = status
-        self._body = body
-
-    def read(self):
-        return self._body
-
-
-class FakeHTTPConnection:
-    def __init__(self, host, port, timeout=None):
-        self.host = host
-        self.port = port
-        self.timeout = timeout
-        self.requests = []
-        self.response = FakeResponse()
-        self.raise_on_request = None
-
-    def request(self, verb, path, body=None, headers=None):
-        if self.raise_on_request is not None:
-            raise self.raise_on_request
-        self.requests.append((verb, path, body, headers))
-
-    def getresponse(self):
-        return self.response
-
-    def close(self):
-        pass
-
-
-def fake_http(monkeypatch, conn):
-    def factory(host, port, timeout=None):
-        conn.host = host
-        conn.port = port
-        conn.timeout = timeout
-        return conn
-
-    monkeypatch.setattr(ck.http.client, "HTTPConnection", factory)
+from fakes import FakeHTTPConnection, FakeResponse, fake_http
 
 
 class TestAgentRunning:
@@ -69,7 +30,7 @@ class TestAgentRunning:
         assert conn.host == "127.0.0.1"
         assert conn.port == 8040
         assert conn.timeout == 1
-        verb, path, _, _ = conn.requests[0]
+        verb, path, _, _ = conn.request_calls[0]
         assert (verb, path) == ("GET", "/api/ping")
 
 
@@ -99,7 +60,7 @@ class TestStopAgent:
         assert conn.host == "127.0.0.1"
         assert conn.port == 8040
         assert conn.timeout == 5
-        verb, path, _, headers = conn.requests[0]
+        verb, path, _, headers = conn.request_calls[0]
         assert (verb, path) == ("POST", "/api/shutdown")
         assert headers["X-ChamberKeep-Token"] == "tok"
 

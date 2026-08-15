@@ -33,6 +33,22 @@ class FakeOC:
         return True, "Server start requested on port 3000"
 
 
+class FakeEvent:
+    """Threading.Event stand-in: becomes set after N wait() calls."""
+
+    def __init__(self, iterations=0):
+        self.iterations = iterations
+        self.calls = 0
+        self.timeouts = []
+
+    def is_set(self):
+        return self.calls >= self.iterations
+
+    def wait(self, timeout):
+        self.calls += 1
+        self.timeouts.append(timeout)
+
+
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setattr(ck, "agent_running", lambda port: False)
@@ -232,12 +248,6 @@ class TestScheduleStartAfterUpdate:
                 "Server restarted after update (port 3000)."
             )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: _schedule_start_after_update ignores the oc.start() "
-        "result and always shows the 'Server restarted after update' success "
-        "notification, even when the start request fails",
-    )
     def test_start_failure_shows_error_notification(self, app, monkeypatch):
         monkeypatch.setattr(ck.threading, "Thread", self.SyncThread)
         app.oc.status_result = ({"state": "stopped", "instances": []}, None)
@@ -296,6 +306,31 @@ class TestRefresh:
         app.refresh()
         assert calls == []
         assert app.agent_running is False
+
+
+class TestPollLoop:
+    def test_refreshes_until_stop_event(self, app, monkeypatch):
+        refreshes = []
+        monkeypatch.setattr(app, "refresh", lambda: refreshes.append(1))
+        app._stop_poll = FakeEvent(iterations=2)
+        app._poll_loop()
+        assert refreshes == [1, 1]
+
+    def test_stops_immediately_when_already_set(self, app, monkeypatch):
+        refreshes = []
+        monkeypatch.setattr(app, "refresh", lambda: refreshes.append(1))
+        app._stop_poll = FakeEvent(iterations=0)
+        app._poll_loop()
+        assert refreshes == []
+
+    def test_waits_poll_seconds_between_refreshes(self, app, monkeypatch):
+        refreshes = []
+        monkeypatch.setattr(app, "refresh", lambda: refreshes.append(1))
+        app.config.poll_seconds = 7
+        app._stop_poll = FakeEvent(iterations=1)
+        app._poll_loop()
+        assert refreshes == [1]
+        assert app._stop_poll.timeouts == [7]
 
 
 class TestTask:

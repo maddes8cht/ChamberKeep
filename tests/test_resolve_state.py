@@ -1,5 +1,3 @@
-import pytest
-
 import ChamberKeep as ck
 
 RUNNING = {
@@ -59,19 +57,10 @@ class TestResolveState:
         data = {"state": "running", "instances": [{"port": "3000"}]}
         assert ck.resolve_state(data, 3000)[0] == "ambiguous"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: instances containing None crash with AttributeError "
-        "('NoneType' object has no attribute 'get')",
-    )
     def test_none_instance_entry(self):
         data = {"state": "running", "instances": [None, {"port": 3000}]}
         assert ck.resolve_state(data, 3000)[0] == "running"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: non-dict instance entries crash with AttributeError",
-    )
     def test_non_dict_instance_entry(self):
         data = {"state": "running", "instances": ["oops", {"port": 3000}]}
         assert ck.resolve_state(data, 3000)[0] == "running"
