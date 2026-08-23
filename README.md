@@ -1,6 +1,6 @@
 # ChamberKeep
 
-Systray controller for [OpenChamber](https://opencode.ai). ChamberKeep does not
+Systray controller for [OpenChamber](https://github.com/openchamber/openchamber), the advanced GUI for the famous [OpenCode](https://opencode.ai) Agent. ChamberKeep does not
 manage the OpenChamber server process itself - it delegates to OpenChamber's
 native daemon management (`serve`, `stop`, `restart`, `status`, `update`) and
 interprets the JSON output.
